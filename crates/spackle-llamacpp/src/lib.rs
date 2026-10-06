@@ -25,8 +25,8 @@ pub use error::ClientError;
 pub use sse::{SseError, SseParser};
 pub use transport::LlamaTransport;
 pub use wire::{
-    chat_request_body, reasoning_effort_wire, Chunk, Delta, DeltaFunction, DeltaToolCall,
-    StreamError, TimingsWire, TokenDetails, ToolCallAssembler, UsageWire,
+    Chunk, Delta, DeltaFunction, DeltaToolCall, StreamError, TimingsWire, TokenDetails,
+    ToolCallAssembler, UsageWire, chat_request_body, reasoning_effort_wire,
 };
 
 use std::sync::atomic::{AtomicU64, Ordering};

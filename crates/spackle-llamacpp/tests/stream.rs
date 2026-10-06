@@ -11,17 +11,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use spackle_core::agent::{
-    FinishReason, InferenceRequest, InferenceTransport, SamplingParams, StreamEvent,
-    ToolDefinition,
+    FinishReason, InferenceRequest, InferenceTransport, SamplingParams, StreamEvent, ToolDefinition,
 };
 use spackle_core::cancel::CancellationToken;
 use spackle_core::message::{Message, ToolCall};
+use spackle_llamacpp::chat_request_body;
 use spackle_llamacpp::client::LlamaCppClient;
 use spackle_llamacpp::sse::SseParser;
 use spackle_llamacpp::transport::LlamaTransport;
 use spackle_llamacpp::wire::{Chunk, ToolCallAssembler};
-use spackle_llamacpp::wire::{usage_from_wire, TimingsWire, UsageWire};
-use spackle_llamacpp::chat_request_body;
+use spackle_llamacpp::wire::{TimingsWire, UsageWire, usage_from_wire};
 
 // ---------------------------------------------------------------------------
 // SSE parser (deterministic fragmentation on top of the unit tests)
@@ -31,7 +30,7 @@ use spackle_llamacpp::chat_request_body;
 fn sse_parser_random_chunk_sizes_are_equivalent() {
     use proptest::prelude::*;
     proptest! {
-        for (chunk, salt) in (1usize..40, 0u32..1024u32) {
+        |(chunk in 1usize..40usize, salt in 0u32..1024u32)| {
             let payload = format!("data: {{\"n\":{salt},\"s\":\"héllo — 🦙\"}}\n\ndata: [DONE]\n\n");
             let bytes = payload.into_bytes();
             let mut whole = SseParser::new();
@@ -74,19 +73,19 @@ fn assembler_handles_fragmented_tool_calls_and_starts() {
     let mut assembler = ToolCallAssembler::new("seed".to_owned());
     apply_delta(
         &mut assembler,
-        r#"{"choices":[{"delta":{"tool_calls":[{"id":"call-1","function":{"name":"inspect_files","arguments":"{\"paths\":["}}]}]}]}"#,
+        r#"{"choices": [{"delta": {"tool_calls": [{"id": "call-1", "function": {"name": "inspect_files", "arguments": "{\"paths\":["}}]}}]}"#,
     );
     apply_delta(
         &mut assembler,
-        r#"{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"\"a\""}}]}]}]}"#,
+        r#"{"choices": [{"delta": {"tool_calls": [{"function": {"arguments": "\"a\""}}]}}]}"#,
     );
     apply_delta(
         &mut assembler,
-        r#"{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"]}]}]}]}"#,
+        r#"{"choices": [{"delta": {"tool_calls": [{"function": {"arguments": "]}"}}]}}]}"#,
     );
     apply_delta(
         &mut assembler,
-        r#"{"choices":[{"delta":{"tool_calls":[{"id":"call-2","function":{"name":"write_file","arguments":"{}"}}]}]}]}"#,
+        r#"{"choices": [{"delta": {"tool_calls": [{"id": "call-2", "function": {"name": "write_file", "arguments": "{}"}}]}}]}"#,
     );
     let calls = assembler.finish();
     assert_eq!(calls.len(), 2, "{calls:?}");
@@ -103,7 +102,7 @@ fn assembler_uses_fallback_ids_when_server_omits_them() {
     let mut assembler = ToolCallAssembler::new("seed".to_owned());
     apply_delta(
         &mut assembler,
-        r#"{"choices":[{"delta":{"tool_calls":[{"function":{"name":"edit_file","arguments":"{}"}}]}]}]}"#,
+        r#"{"choices": [{"delta": {"tool_calls": [{"function": {"name": "edit_file", "arguments": "{}"}}]}}]}"#,
     );
     let calls = assembler.finish();
     assert_eq!(calls.len(), 1);
@@ -130,7 +129,8 @@ fn request_body_carries_profile_and_parse_tool_calls() {
     let mut request = base_request();
     request.sampling.enable_thinking = Some(true);
     request.sampling.preserve_thinking = Some(true);
-    request.sampling.reasoning_effort = Some(spackle_core::config::generation::ReasoningEffort::Medium);
+    request.sampling.reasoning_effort =
+        Some(spackle_core::config::generation::ReasoningEffort::Medium);
     request.tools = vec![ToolDefinition {
         name: "inspect_files".into(),
         description: "read files".into(),
@@ -146,10 +146,22 @@ fn request_body_carries_profile_and_parse_tool_calls() {
     );
     assert_eq!(body["stream"], serde_json::Value::Bool(true));
     assert_eq!(body["parse_tool_calls"], serde_json::Value::Bool(true));
-    assert_eq!(body["stream_options"]["include_usage"], serde_json::Value::Bool(true));
-    assert_eq!(body["chat_template_kwargs"]["enable_thinking"], serde_json::Value::Bool(true));
-    assert_eq!(body["chat_template_kwargs"]["preserve_thinking"], serde_json::Value::Bool(true));
-    assert_eq!(body["reasoning_effort"], serde_json::Value::String("medium".into()));
+    assert_eq!(
+        body["stream_options"]["include_usage"],
+        serde_json::Value::Bool(true)
+    );
+    assert_eq!(
+        body["chat_template_kwargs"]["enable_thinking"],
+        serde_json::Value::Bool(true)
+    );
+    assert_eq!(
+        body["chat_template_kwargs"]["preserve_thinking"],
+        serde_json::Value::Bool(true)
+    );
+    assert_eq!(
+        body["reasoning_effort"],
+        serde_json::Value::String("medium".into())
+    );
     assert_eq!(body["messages"][0]["role"], "system");
     assert_eq!(body["messages"][1]["role"], "user");
     assert_eq!(body["messages"][1]["content"], "Say hi.");
@@ -185,17 +197,17 @@ fn usage_and_timings_wire_mapping_is_lossless() {
 // ---------------------------------------------------------------------------
 
 async fn serve_script(script: Vec<Vec<u8>>) -> String {
-    use axum::body::Bytes;
+    use axum::Router;
+    use axum::body::{Body, Bytes};
     use axum::http::Response;
     use axum::routing::post;
-    use axum::Router;
 
     #[derive(Clone)]
     struct S {
         script: Arc<Vec<Vec<u8>>>,
     }
 
-    async fn chat(state: axum::extract::State<S>) -> Response<Bytes> {
+    async fn chat(state: axum::extract::State<S>) -> Response<Body> {
         let mut body: Vec<u8> = Vec::new();
         for batch in state.script.iter() {
             body.extend_from_slice(batch);
@@ -203,7 +215,7 @@ async fn serve_script(script: Vec<Vec<u8>>) -> String {
         Response::builder()
             .status(200)
             .header("content-type", "text/event-stream")
-            .body(Bytes::from(body))
+            .body(Body::from(Bytes::from(body)))
             .unwrap()
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -231,7 +243,10 @@ async fn run_infer(
     base_url: &str,
     request: InferenceRequest,
     cancel: CancellationToken,
-) -> Result<(spackle_core::agent::InferenceResult, Vec<StreamEvent>), spackle_core::agent::TransportError> {
+) -> Result<
+    (spackle_core::agent::InferenceResult, Vec<StreamEvent>),
+    spackle_core::agent::TransportError,
+> {
     let client = LlamaCppClient::new(base_url).unwrap();
     let transport = LlamaTransport::new(client, "model".to_owned());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
@@ -271,7 +286,10 @@ async fn end_to_end_text_stream_with_usage_and_timings() {
             _ => None,
         })
         .collect();
-    assert_eq!(text_events, vec!["Hel".to_owned(), "lo wörld — 🦙".to_owned()]);
+    assert_eq!(
+        text_events,
+        vec!["Hel".to_owned(), "lo wörld — 🦙".to_owned()]
+    );
     assert!(matches!(result.finish_reason, FinishReason::Stop));
 }
 
@@ -299,9 +317,9 @@ async fn end_to_end_reasoning_then_text() {
 #[tokio::test]
 async fn end_to_end_tool_call_streaming_assembles() {
     let script = vec![
-        b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"id\":\"call-9\",\"function\":{\"name\":\"inspect_files\",\"arguments\":\"{\"}}]}]}]}\n\n".to_vec(),
-        b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"\"}}]}]}]}\n\n".to_vec(),
-        b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"}\"}}]}]}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"id\":\"call-9\",\"function\":{\"name\":\"inspect_files\",\"arguments\":\"{\"}}]},\"finish_reason\":null}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n".to_vec(),
+        b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"}\"}}]},\"finish_reason\":null}]}\n\n".to_vec(),
         b"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n".to_vec(),
         b"data: [DONE]\n\n".to_vec(),
     ];
@@ -324,11 +342,11 @@ async fn end_to_end_tool_call_streaming_assembles() {
 }
 
 async fn serve_status(status: u16, body: &str) -> String {
-    use axum::body::Bytes;
+    use axum::Router;
+    use axum::body::{Body, Bytes};
     use axum::extract::State;
     use axum::http::Response;
     use axum::routing::post;
-    use axum::Router;
 
     #[derive(Clone)]
     struct S {
@@ -336,11 +354,11 @@ async fn serve_status(status: u16, body: &str) -> String {
         body: Vec<u8>,
     }
 
-    async fn chat(state: State<S>) -> Response<Bytes> {
+    async fn chat(state: State<S>) -> Response<Body> {
         Response::builder()
             .status(state.status)
             .header("content-type", "application/json")
-            .body(Bytes::from(state.body.clone()))
+            .body(Body::from(Bytes::from(state.body.clone())))
             .unwrap()
     }
 
@@ -386,8 +404,11 @@ async fn http_429_is_transient_for_retry() {
 
 #[tokio::test]
 async fn unknown_field_400_is_a_capability_error() {
-    let base_url =
-        serve_status(400, r#"{"error":"unrecognized field `chat_template_kwargs`"}"#).await;
+    let base_url = serve_status(
+        400,
+        r#"{"error":"unrecognized field `chat_template_kwargs`"}"#,
+    )
+    .await;
     let err = run_infer(&base_url, base_request(), CancellationToken::new())
         .await
         .unwrap_err();
@@ -401,7 +422,10 @@ async fn unknown_field_400_is_a_capability_error() {
 
 #[tokio::test]
 async fn server_error_chunk_mid_stream_is_fatal() {
-    let script = vec![text_chunk("partial"), b"data: {\"error\":{\"message\":\"server exploded\"}}\n\n".to_vec()];
+    let script = vec![
+        text_chunk("partial"),
+        b"data: {\"error\":{\"message\":\"server exploded\"}}\n\n".to_vec(),
+    ];
     let base_url = serve_script(script).await;
     let err = run_infer(&base_url, base_request(), CancellationToken::new())
         .await
@@ -416,10 +440,10 @@ async fn server_error_chunk_mid_stream_is_fatal() {
 
 #[tokio::test]
 async fn cancellation_mid_stream_returns_promptly() {
+    use axum::Router;
     use axum::body::Body;
     use axum::http::Response;
     use axum::routing::post;
-    use axum::Router;
     use bytes::Bytes;
 
     async fn slow() -> Response<Body> {
@@ -432,17 +456,20 @@ async fn cancellation_mid_stream_returns_promptly() {
             ),
             Bytes::from("data: [DONE]\n\n"),
         ];
-        let stream = futures_util::stream::unfold((pieces, 0usize), |(mut pieces, i): (Vec<Bytes>, usize)| async move {
-            if i >= pieces.len() {
-                return None;
-            }
-            let piece = pieces[i].clone();
-            if i + 1 == pieces.len() {
-                // Hold the final event: a client that waits would hang.
-                tokio::time::sleep(Duration::from_secs(60)).await;
-            }
-            Some((Ok(piece) as Result<Bytes, std::io::Error>, (pieces, i + 1)))
-        });
+        let stream = futures_util::stream::unfold(
+            (pieces, 0usize),
+            |(pieces, i): (Vec<Bytes>, usize)| async move {
+                if i >= pieces.len() {
+                    return None;
+                }
+                let piece = pieces[i].clone();
+                if i + 1 == pieces.len() {
+                    // Hold the final event: a client that waits would hang.
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
+                Some((Ok(piece) as Result<Bytes, std::io::Error>, (pieces, i + 1)))
+            },
+        );
         Response::builder()
             .status(200)
             .header("content-type", "text/event-stream")
@@ -462,9 +489,9 @@ async fn cancellation_mid_stream_returns_promptly() {
     let transport = LlamaTransport::new(client, "model".to_owned());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
     let token = CancellationToken::new();
-    let task = tokio::spawn(async move {
-        transport.infer(base_request(), token.clone(), tx).await
-    });
+    let token_for_task = token.clone();
+    let task =
+        tokio::spawn(async move { transport.infer(base_request(), token_for_task, tx).await });
 
     // Wait for the first streamed delta, then cancel.
     assert!(rx.recv().await.is_some(), "expected at least one delta");
@@ -472,7 +499,8 @@ async fn cancellation_mid_stream_returns_promptly() {
     let started = std::time::Instant::now();
     let outcome = tokio::time::timeout(Duration::from_secs(5), task)
         .await
-        .expect("cancellation must return promptly");
+        .expect("cancellation must return promptly")
+        .expect("infer task must not panic");
     let elapsed = started.elapsed();
     let err = outcome.unwrap_err();
     assert!(

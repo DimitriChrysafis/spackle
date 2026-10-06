@@ -1,8 +1,8 @@
 //! Client errors with transport classification (transient vs fatal vs
 //! capability) so the agent loop can retry or diagnose precisely.
 
-use spackle_core::agent::TransportError;
 use reqwest::StatusCode;
+use spackle_core::agent::TransportError;
 use thiserror::Error;
 
 use crate::sse::SseError;
@@ -38,12 +38,14 @@ pub enum ClientError {
 impl ClientError {
     /// Build a classified HTTP error from a status and response body.
     pub(crate) fn http(status: StatusCode, body: String) -> Self {
-        let message = extract_error_message(&body)
-            .unwrap_or_else(|| format!("HTTP {} {}", status.as_u16(), status.canonical_reason().unwrap_or("error")));
-        let retryable = matches!(
-            status.as_u16(),
-            408 | 425 | 429 | 500 | 502 | 503 | 504
-        );
+        let message = extract_error_message(&body).unwrap_or_else(|| {
+            format!(
+                "HTTP {} {}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("error")
+            )
+        });
+        let retryable = matches!(status.as_u16(), 408 | 425 | 429 | 500 | 502 | 503 | 504);
         let capability = looks_like_capability(&body).map(|feature| {
             (
                 feature.to_owned(),
@@ -70,12 +72,10 @@ fn extract_error_message(body: &str) -> Option<String> {
             if let Some(message) = value
                 .get(key)
                 .or_else(|| value.get("error").and_then(|e| e.get("message")))
+                && let Some(text) = message.as_str()
+                && !text.is_empty()
             {
-                if let Some(text) = message.as_str() {
-                    if !text.is_empty() {
-                        return Some(text.to_owned());
-                    }
-                }
+                return Some(text.to_owned());
             }
         }
         return None;
@@ -120,9 +120,7 @@ impl From<ClientError> for TransportError {
                 capability,
             } => match capability {
                 Some((feature, hint)) => TransportError::Capability { feature, hint },
-                None if retryable => {
-                    TransportError::Transient(format!("HTTP {status}: {message}"))
-                }
+                None if retryable => TransportError::Transient(format!("HTTP {status}: {message}")),
                 None => TransportError::Fatal(format!("HTTP {status}: {message}")),
             },
             ClientError::Sse(err) => TransportError::Fatal(err.to_string()),
@@ -140,12 +138,13 @@ mod tests {
     fn llamacpp_error_bodies_extract_messages() {
         let err = ClientError::http(
             StatusCode::BAD_REQUEST,
-            r#"{"error":{"message":"model not found","type":"invalid_request_error"}}"#
-                .to_owned(),
+            r#"{"error":{"message":"model not found","type":"invalid_request_error"}}"#.to_owned(),
         );
         let transport: TransportError = err.into();
         match transport {
-            TransportError::Fatal(message) => assert!(message.contains("model not found"), "{message}"),
+            TransportError::Fatal(message) => {
+                assert!(message.contains("model not found"), "{message}")
+            }
             other => panic!("expected fatal, got {other:?}"),
         }
     }

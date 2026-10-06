@@ -119,10 +119,7 @@ impl LlamaCppClient {
             .await?;
         let status = response.status();
         if !status.is_success() {
-            let text = response
-                .text()
-                .await
-                .unwrap_or_default();
+            let text = response.text().await.unwrap_or_default();
             return Err(ClientError::http(status, text));
         }
         let stream = response
@@ -153,10 +150,18 @@ impl LlamaCppClient {
             return Err(ClientError::http(status, text));
         }
         let body: Value = response.json().await?;
-        let data = body.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
+        let data = body
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         let mut out = Vec::new();
         for item in data {
-            let id = item.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+            let id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
             let aliases = item
                 .get("aliases")
                 .and_then(Value::as_array)
@@ -172,11 +177,7 @@ impl LlamaCppClient {
                 .and_then(|meta| meta.get("n_ctx"))
                 .and_then(Value::as_u64)
                 .or_else(|| item.get("n_ctx").and_then(Value::as_u64));
-            out.push(ModelInfo {
-                id,
-                aliases,
-                n_ctx,
-            });
+            out.push(ModelInfo { id, aliases, n_ctx });
         }
         Ok(out)
     }
@@ -205,7 +206,10 @@ impl LlamaCppClient {
             .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
         Ok(EndpointProbe {
             path: path.to_owned(),
-            supported: !matches!(status, reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::NOT_IMPLEMENTED),
+            supported: !matches!(
+                status,
+                reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::NOT_IMPLEMENTED
+            ),
             status: status.as_u16(),
             body,
         })

@@ -50,17 +50,10 @@ impl SseParser {
 
     /// Consume one raw chunk and return all `data` payloads that
     /// completed inside it, in order.
-    pub fn feed(
-        &mut self,
-        chunk: &[u8],
-    ) -> Result<Vec<String>, SseError> {
+    pub fn feed(&mut self, chunk: &[u8]) -> Result<Vec<String>, SseError> {
         self.pending.extend_from_slice(chunk);
         let mut out: Vec<String> = Vec::new();
-        loop {
-            let newline = match self.pending.iter().position(|b| *b == b'\n') {
-                Some(pos) => pos,
-                None => break,
-            };
+        while let Some(newline) = self.pending.iter().position(|b| *b == b'\n') {
             let mut line: Vec<u8> = self.pending.drain(..=newline).collect();
             // Drop the terminating newline, then tolerate CRLF by stripping
             // one trailing CR.
@@ -68,9 +61,8 @@ impl SseParser {
             if line.last() == Some(&b'\r') {
                 line.pop();
             }
-            match self.handle_line(&line)? {
-                Some(payload) => out.push(payload),
-                None => {}
+            if let Some(payload) = self.handle_line(&line)? {
+                out.push(payload);
             }
         }
         Ok(out)
@@ -81,7 +73,10 @@ impl SseParser {
     pub fn finish(&mut self) -> Option<String> {
         if !self.pending.is_empty() {
             let line: Vec<u8> = std::mem::take(&mut self.pending);
-            if let Some(payload) = self.handle_line(&line).expect("finish: pending bytes were already validated per line") {
+            if let Some(payload) = self
+                .handle_line(&line)
+                .expect("finish: pending bytes were already validated per line")
+            {
                 return Some(payload);
             }
         }
@@ -102,8 +97,7 @@ impl SseParser {
     }
 
     fn handle_line(&mut self, line: &[u8]) -> Result<Option<String>, SseError> {
-        let text = String::from_utf8(line.to_vec())
-            .map_err(|_| SseError::InvalidUtf8)?;
+        let text = String::from_utf8(line.to_vec()).map_err(|_| SseError::InvalidUtf8)?;
         if text.is_empty() {
             // Blank line dispatches the event.
             if self.event_lines.is_empty() {
@@ -158,9 +152,7 @@ mod tests {
     #[test]
     fn parses_single_data_event() {
         let mut parser = SseParser::new();
-        let events = parser
-            .feed(b"data: {\"x\":1}\n\n")
-            .expect("feed");
+        let events = parser.feed(b"data: {\"x\":1}\n\n").expect("feed");
         assert_eq!(events, vec!["{\"x\":1}"]);
     }
 
@@ -175,7 +167,9 @@ mod tests {
     #[test]
     fn handles_crlf_line_endings() {
         let mut parser = SseParser::new();
-        let events = parser.feed(b"data: a\r\n\r\ndata: b\r\n\r\n").expect("feed");
+        let events = parser
+            .feed(b"data: a\r\n\r\ndata: b\r\n\r\n")
+            .expect("feed");
         assert_eq!(events, vec!["a", "b"]);
     }
 

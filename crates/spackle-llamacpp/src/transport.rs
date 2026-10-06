@@ -16,15 +16,15 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 
 use spackle_core::agent::{
-    FinishReason, InferenceRequest, InferenceResult, InferenceTransport, StreamEvent,
-    Timings, TransportError, Usage,
+    FinishReason, InferenceRequest, InferenceResult, InferenceTransport, StreamEvent, Timings,
+    TransportError, Usage,
 };
 use spackle_core::cancel::CancellationToken;
 
 use crate::client::LlamaCppClient;
 use crate::error::ClientError;
 use crate::sse::SseParser;
-use crate::wire::{chat_request_body, Chunk, TimingsWire, ToolCallAssembler, usage_from_wire};
+use crate::wire::{Chunk, TimingsWire, ToolCallAssembler, chat_request_body, usage_from_wire};
 
 /// One inference step over HTTP.
 #[derive(Debug, Clone)]
@@ -113,54 +113,57 @@ impl StepAssembler {
         }
         if let Some(timings) = &chunk.timings {
             self.timings = Some(timings_from_wire(timings));
-            let _ = events.send(StreamEvent::Timings(self.timings.clone().unwrap_or_default()));
+            let _ = events.send(StreamEvent::Timings(
+                self.timings.clone().unwrap_or_default(),
+            ));
         }
         for choice in chunk.choices.iter().flatten() {
             let delta = &choice.delta;
-            if let Some(fragment) = &delta.reasoning_content {
-                if !fragment.is_empty() {
-                    self.mark_first_token();
-                    let _ = events.send(StreamEvent::ReasoningDelta {
-                        text: fragment.clone(),
-                    });
-                    self.reasoning.push_str(fragment);
-                }
+            if let Some(fragment) = &delta.reasoning_content
+                && !fragment.is_empty()
+            {
+                self.mark_first_token();
+                let _ = events.send(StreamEvent::ReasoningDelta {
+                    text: fragment.clone(),
+                });
+                self.reasoning.push_str(fragment);
             }
-            if let Some(fragment) = &delta.content {
-                if !fragment.is_empty() {
-                    self.mark_first_token();
-                    let _ = events.send(StreamEvent::TextDelta {
-                        text: fragment.clone(),
-                    });
-                    self.content.push_str(fragment);
-                }
+            if let Some(fragment) = &delta.content
+                && !fragment.is_empty()
+            {
+                self.mark_first_token();
+                let _ = events.send(StreamEvent::TextDelta {
+                    text: fragment.clone(),
+                });
+                self.content.push_str(fragment);
             }
-            if let Some(items) = &delta.tool_calls {
-                if !items.is_empty() {
-                    self.mark_first_token();
-                    for (index, item) in items.iter().enumerate() {
-                        let arguments = item
+            if let Some(items) = &delta.tool_calls
+                && !items.is_empty()
+            {
+                self.mark_first_token();
+                for (index, item) in items.iter().enumerate() {
+                    let arguments = item
+                        .function
+                        .as_ref()
+                        .and_then(|function| function.arguments.clone())
+                        .unwrap_or_default();
+                    let _ = events.send(StreamEvent::ToolCallDelta {
+                        index,
+                        id: item.id.clone(),
+                        name: item
                             .function
                             .as_ref()
-                            .and_then(|function| function.arguments.clone())
-                            .unwrap_or_default();
-                        let _ = events.send(StreamEvent::ToolCallDelta {
-                            index,
-                            id: item.id.clone(),
-                            name: item
-                                .function
-                                .as_ref()
-                                .and_then(|function| function.name.clone()),
-                            arguments,
-                        });
-                    }
-                    self.calls.apply(delta);
+                            .and_then(|function| function.name.clone()),
+                        arguments,
+                    });
                 }
+                self.calls.apply(delta);
             }
-            if let Some(reason) = &choice.finish_reason {
-                if !reason.is_empty() && reason != "null" {
-                    self.finish_reason = Some(reason.clone());
-                }
+            if let Some(reason) = &choice.finish_reason
+                && !reason.is_empty()
+                && reason != "null"
+            {
+                self.finish_reason = Some(reason.clone());
             }
         }
     }
@@ -176,13 +179,14 @@ impl StepAssembler {
         InferenceResult {
             content: self.content,
             reasoning: self.reasoning,
-            finish_reason: finish_reason_from_wire(self.finish_reason.as_deref(), !tool_calls.is_empty()),
+            finish_reason: finish_reason_from_wire(
+                self.finish_reason.as_deref(),
+                !tool_calls.is_empty(),
+            ),
             tool_calls,
             usage: self.usage.unwrap_or_default(),
             timings: self.timings.unwrap_or_default(),
-            first_token_ms: self
-                .first_token
-                .map(|at| at.elapsed().as_millis() as u64),
+            first_token_ms: self.first_token.map(|at| at.elapsed().as_millis() as u64),
         }
     }
 }
@@ -209,83 +213,86 @@ impl InferenceTransport for LlamaTransport {
         let mut parser = SseParser::new();
 
         // Bridge the std condvar cancellation token into the async select.
+        // The wait is a blocking condvar call, so it must live on the
+        // blocking pool — spawning it as a regular task would park the
+        // executor on a current-thread runtime.
         let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
         let token = cancel.clone();
-        let cancel_handle = tokio::spawn(async move {
+        let cancel_handle = tokio::task::spawn_blocking(move || {
             token.block_until_cancelled();
             let _ = cancel_tx.send(());
         });
 
         'stream: loop {
-                tokio::select! {
-                    biased;
-                    _ = &mut cancel_rx => {
-                        cancel_handle.abort();
-                        return Err(ClientError::Cancelled.into());
-                    }
-                    next = stream.next() => match next {
-                        Some(Ok(bytes)) => {
-                            if cancel.is_cancelled() {
-                                cancel_handle.abort();
-                                return Err(ClientError::Cancelled.into());
-                            }
-                            for payload in parser.feed(&bytes).map_err(ClientError::Sse)? {
-                                if payload == "[DONE]" {
-                                    break 'stream;
-                                }
-                                let chunk = match serde_json::from_str::<Chunk>(&payload) {
-                                    Ok(chunk) => chunk,
-                                    Err(err) => {
-                                        cancel_handle.abort();
-                                        return Err(ClientError::Malformed(format!(
-                                            "unparseable SSE payload `{payload}`: {err}"
-                                        ))
-                                        .into());
-                                    }
-                                };
-                                if let Some(stream_error) = &chunk.error {
-                                    cancel_handle.abort();
-                                    return Err(TransportError::Fatal(
-                                        stream_error
-                                            .message
-                                            .clone()
-                                            .unwrap_or_else(|| "stream error from server".to_owned()),
-                                    ));
-                                }
-                                assembler.apply_chunk(&chunk, &events);
-                            }
-                        }
-                        Some(Err(err)) => {
-                            cancel_handle.abort();
-                            return Err(err.into());
-                        }
-                        None => break,
-                    },
+            tokio::select! {
+                biased;
+                _ = &mut cancel_rx => {
+                    cancel_handle.abort();
+                    return Err(ClientError::Cancelled.into());
                 }
+                next = stream.next() => match next {
+                    Some(Ok(bytes)) => {
+                        if cancel.is_cancelled() {
+                            cancel_handle.abort();
+                            return Err(ClientError::Cancelled.into());
+                        }
+                        for payload in parser.feed(&bytes).map_err(ClientError::Sse)? {
+                            if payload == "[DONE]" {
+                                break 'stream;
+                            }
+                            let chunk = match serde_json::from_str::<Chunk>(&payload) {
+                                Ok(chunk) => chunk,
+                                Err(err) => {
+                                    cancel_handle.abort();
+                                    return Err(ClientError::Malformed(format!(
+                                        "unparseable SSE payload `{payload}`: {err}"
+                                    ))
+                                    .into());
+                                }
+                            };
+                            if let Some(stream_error) = &chunk.error {
+                                cancel_handle.abort();
+                                return Err(TransportError::Fatal(
+                                    stream_error
+                                        .message
+                                        .clone()
+                                        .unwrap_or_else(|| "stream error from server".to_owned()),
+                                ));
+                            }
+                            assembler.apply_chunk(&chunk, &events);
+                        }
+                    }
+                    Some(Err(err)) => {
+                        cancel_handle.abort();
+                        return Err(err.into());
+                    }
+                    None => break,
+                },
+            }
         }
 
         // Flush a final event that lacked a trailing blank line.
-        if let Some(payload) = parser.finish() {
-            if payload != "[DONE]" {
-                match serde_json::from_str::<Chunk>(&payload) {
-                    Ok(chunk) => {
-                        if let Some(stream_error) = &chunk.error {
-                            let message = stream_error
-                                .message
-                                .clone()
-                                .unwrap_or_else(|| "stream error from server".to_owned());
-                            cancel_handle.abort();
-                            return Err(TransportError::Fatal(message));
-                        }
-                        assembler.apply_chunk(&chunk, &events);
-                    }
-                    Err(err) => {
+        if let Some(payload) = parser.finish()
+            && payload != "[DONE]"
+        {
+            match serde_json::from_str::<Chunk>(&payload) {
+                Ok(chunk) => {
+                    if let Some(stream_error) = &chunk.error {
+                        let message = stream_error
+                            .message
+                            .clone()
+                            .unwrap_or_else(|| "stream error from server".to_owned());
                         cancel_handle.abort();
-                        return Err(ClientError::Malformed(format!(
-                            "unparseable final SSE payload `{payload}`: {err}"
-                        ))
-                        .into());
+                        return Err(TransportError::Fatal(message));
                     }
+                    assembler.apply_chunk(&chunk, &events);
+                }
+                Err(err) => {
+                    cancel_handle.abort();
+                    return Err(ClientError::Malformed(format!(
+                        "unparseable final SSE payload `{payload}`: {err}"
+                    ))
+                    .into());
                 }
             }
         }

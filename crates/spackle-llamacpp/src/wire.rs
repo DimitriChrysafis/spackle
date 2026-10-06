@@ -83,7 +83,6 @@ pub fn chat_request_body(
         body["chat_template_kwargs"] = Value::Object(
             kwargs
                 .into_iter()
-                .map(|(k, v)| (k, v))
                 .collect::<serde_json::Map<String, Value>>(),
         );
     }
@@ -123,8 +122,8 @@ fn message_wire(system: &str, messages: &[Message]) -> Value {
                     "role": "assistant",
                     "content": message.text(),
                 });
-                if let Some(reasoning) = (!message.reasoning().is_empty())
-                    .then(|| message.reasoning())
+                if let Some(reasoning) =
+                    (!message.reasoning().is_empty()).then(|| message.reasoning())
                 {
                     item["reasoning_content"] = Value::String(reasoning);
                 }
@@ -154,9 +153,11 @@ fn message_wire(system: &str, messages: &[Message]) -> Value {
                     .blocks
                     .iter()
                     .find_map(|block| match block {
-                        ContentBlock::ToolResult(result) => {
-                            Some((result.id.clone(), result.name.clone(), result.output.clone()))
-                        }
+                        ContentBlock::ToolResult(result) => Some((
+                            result.id.clone(),
+                            result.name.clone(),
+                            result.output.clone(),
+                        )),
                         _ => None,
                     })
                     .unwrap_or_default();
@@ -262,10 +263,15 @@ pub fn usage_from_wire(wire: &UsageWire) -> Usage {
             .prompt_tokens_details
             .as_ref()
             .and_then(|details| details.cached_tokens)
-            .or_else(|| wire.completion_tokens_details.as_ref().and_then(|d| d.cached_tokens)),
-        reasoning_tokens: wire.completion_tokens_details.as_ref().and_then(|details| {
-            details.reasoning_tokens
-        }),
+            .or_else(|| {
+                wire.completion_tokens_details
+                    .as_ref()
+                    .and_then(|d| d.cached_tokens)
+            }),
+        reasoning_tokens: wire
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|details| details.reasoning_tokens),
     }
 }
 
@@ -295,11 +301,16 @@ impl ToolCallAssembler {
     /// Apply one delta's tool-call data (if any).
     pub fn apply(&mut self, delta: &Delta) {
         for (position, item) in delta.tool_calls.iter().flatten().enumerate() {
-            let has_identity = item.id.is_some() || item.function.as_ref().is_some_and(|function| function.name.is_some());
+            let has_identity = item.id.is_some()
+                || item
+                    .function
+                    .as_ref()
+                    .is_some_and(|function| function.name.is_some());
             let index = if has_identity {
-                let id = item.id.clone().unwrap_or_else(|| {
-                    format!("call-{}-{}", self.fallback_seed, self.calls.len())
-                });
+                let id = item
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| format!("call-{}-{}", self.fallback_seed, self.calls.len()));
                 let name = item
                     .function
                     .as_ref()
@@ -319,11 +330,7 @@ impl ToolCallAssembler {
                     None => {
                         // Defensive: an arguments-only delta with no open
                         // call (should not happen from llama.cpp).
-                        let id = format!(
-                            "call-{}-{}",
-                            self.fallback_seed,
-                            self.calls.len()
-                        );
+                        let id = format!("call-{}-{}", self.fallback_seed, self.calls.len());
                         self.calls.push(ToolCall {
                             id,
                             name: String::new(),
@@ -339,25 +346,24 @@ impl ToolCallAssembler {
                 .function
                 .as_ref()
                 .and_then(|function| function.arguments.clone())
+                && !fragment.is_empty()
             {
-                if !fragment.is_empty() {
-                    let call = &mut self.calls[index];
-                    let accumulated = match &mut call.arguments {
-                        Value::Null => fragment.clone(),
-                        existing => {
-                            let mut text = existing.as_str().unwrap_or("").to_owned();
-                            text.push_str(fragment);
-                            text
-                        }
-                    };
-                    // Arguments arrive as a JSON *string* of the object;
-                    // parse eagerly when complete, keeping the raw string
-                    // otherwise (never fail mid-stream).
-                    if let Ok(parsed) = serde_json::from_str::<Value>(&accumulated) {
-                        call.arguments = parsed;
-                    } else {
-                        call.arguments = Value::String(accumulated);
+                let call = &mut self.calls[index];
+                let accumulated = match &mut call.arguments {
+                    Value::Null => fragment.clone(),
+                    existing => {
+                        let mut text = existing.as_str().unwrap_or("").to_owned();
+                        text.push_str(fragment);
+                        text
                     }
+                };
+                // Arguments arrive as a JSON *string* of the object;
+                // parse eagerly when complete, keeping the raw string
+                // otherwise (never fail mid-stream).
+                if let Ok(parsed) = serde_json::from_str::<Value>(&accumulated) {
+                    call.arguments = parsed;
+                } else {
+                    call.arguments = Value::String(accumulated);
                 }
             }
             let _ = position;
@@ -443,7 +449,10 @@ mod tests {
         assert_eq!(messages[0]["role"], "system");
         assert_eq!(messages[1]["role"], "assistant");
         assert_eq!(messages[1]["reasoning_content"], "thought");
-        assert_eq!(messages[1]["tool_calls"][0]["function"]["name"], "inspect_files");
+        assert_eq!(
+            messages[1]["tool_calls"][0]["function"]["name"],
+            "inspect_files"
+        );
         let args = messages[1]["tool_calls"][0]["function"]["arguments"]
             .as_str()
             .expect("wire arguments are a string");
@@ -452,8 +461,12 @@ mod tests {
 
     #[test]
     fn tool_result_wire_message_uses_tool_call_id() {
-        let message =
-            spackle_core::message::Message::tool_result("call_9".to_owned(), "echo".to_owned(), "out".to_owned(), false);
+        let message = spackle_core::message::Message::tool_result(
+            "call_9".to_owned(),
+            "echo".to_owned(),
+            "out".to_owned(),
+            false,
+        );
         let messages = message_wire("", &[message]);
         assert_eq!(messages[0]["role"], "tool");
         assert_eq!(messages[0]["tool_call_id"], "call_9");
@@ -490,10 +503,7 @@ mod tests {
         let chunk: Chunk = serde_json::from_str(raw).expect("chunk");
         let choices = chunk.choices.expect("choices");
         assert_eq!(choices.len(), 1);
-        assert_eq!(
-            choices[0].delta.content.as_deref(),
-            Some("he")
-        );
+        assert_eq!(choices[0].delta.content.as_deref(), Some("he"));
         let usage = usage_from_wire(&chunk.usage.expect("usage"));
         assert_eq!(usage.prompt_tokens, Some(10));
         assert_eq!(usage.cached_tokens, Some(8));
@@ -548,6 +558,10 @@ mod tests {
         assembler.apply(&delta);
         let calls = assembler.finish();
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].id.contains("req-7"), "fallback id must be stable per request: {}", calls[0].id);
+        assert!(
+            calls[0].id.contains("req-7"),
+            "fallback id must be stable per request: {}",
+            calls[0].id
+        );
     }
 }

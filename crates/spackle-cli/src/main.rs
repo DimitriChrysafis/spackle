@@ -10,14 +10,14 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use spackle_core::agent::{
     DenyAllGate, SamplingParams, StreamEvent, ToolDefinition, ToolRegistry, TurnContext,
 };
 use spackle_core::cancel::CancellationToken;
-use spackle_core::config::generation::ReasoningEffort;
 use spackle_core::config::Loader;
+use spackle_core::config::generation::ReasoningEffort;
 use spackle_core::message::Message;
 use spackle_llamacpp::{LlamaCppClient, LlamaTransport};
 
@@ -141,7 +141,9 @@ async fn ask(args: AskArgs) -> Result<()> {
         eprintln!("warning: {warning}");
     }
 
-    let model = args.model.unwrap_or_else(|| loaded.config.endpoint.model.clone());
+    let model = args
+        .model
+        .unwrap_or_else(|| loaded.config.endpoint.model.clone());
     let client = build_client(&loaded.config, args.allow_private_lan)?;
     let transport = LlamaTransport::new(client, model.clone());
 
@@ -183,8 +185,7 @@ async fn ask(args: AskArgs) -> Result<()> {
         }
     }
     if system.is_empty() {
-        system = "You are spackle, a careful local coding agent."
-            .to_owned();
+        system = "You are spackle, a careful local coding agent.".to_owned();
     }
 
     let registry = ToolRegistry::new();
@@ -231,22 +232,19 @@ async fn ask(args: AskArgs) -> Result<()> {
     let cancel = CancellationToken::new();
     let mut transcript: Vec<Message> = Vec::new();
     let user = Message::user(&prompt);
-    let outcome = spackle_core::agent::run_turn(
-        &context,
-        "ask",
-        &mut transcript,
-        user,
-        cancel,
-        tx,
-    )
-    .await;
+    let outcome =
+        spackle_core::agent::run_turn(&context, "ask", &mut transcript, user, cancel, tx).await;
 
     printer.await.expect("printer task must not panic");
 
     match outcome {
         Ok(outcome) => {
             println!();
-            eprintln!("({} step{})", outcome.steps, if outcome.steps == 1 { "" } else { "s" });
+            eprintln!(
+                "({} step{})",
+                outcome.steps,
+                if outcome.steps == 1 { "" } else { "s" }
+            );
             Ok(())
         }
         Err(agent_error) => {
@@ -279,7 +277,9 @@ fn load_config(
     let start_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut loader = Loader::standard(start_dir);
     loader.cli_overrides = cli_overrides;
-    loader.load().map_err(|error| anyhow::anyhow!(error.to_string()))
+    loader
+        .load()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
 fn build_client(
