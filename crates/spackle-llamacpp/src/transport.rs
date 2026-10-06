@@ -10,7 +10,9 @@
 //! - honour the shared `CancellationToken` promptly, dropping the stream;
 //! - classify failures (transient / fatal / capability) for the loop.
 
-use std::time::Instant;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -141,7 +143,8 @@ impl StepAssembler {
                 && !items.is_empty()
             {
                 self.mark_first_token();
-                for (index, item) in items.iter().enumerate() {
+                for (position, item) in items.iter().enumerate() {
+                    let index = item.index.map_or(position, |i| i as usize);
                     let arguments = item
                         .function
                         .as_ref()
@@ -206,6 +209,7 @@ impl InferenceTransport for LlamaTransport {
             &request.tools,
             &request.sampling,
             true,
+            self.client.api(),
         );
         let seed = format!("{}-{}", std::process::id(), crate::next_request_counter());
         let mut assembler = StepAssembler::new(seed);
@@ -213,15 +217,31 @@ impl InferenceTransport for LlamaTransport {
         let mut parser = SseParser::new();
 
         // Bridge the std condvar cancellation token into the async select.
-        // The wait is a blocking condvar call, so it must live on the
-        // blocking pool — spawning it as a regular task would park the
-        // executor on a current-thread runtime.
+        // The wait must live on the blocking pool (a regular task would
+        // park a current-thread executor) and must exit when the stream
+        // ends even without a cancel: a parked condvar waiter would
+        // otherwise stall runtime shutdown, which waits on the pool.
         let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
-        let token = cancel.clone();
-        let cancel_handle = tokio::task::spawn_blocking(move || {
-            token.block_until_cancelled();
-            let _ = cancel_tx.send(());
-        });
+        let finished = Arc::new(AtomicBool::new(false));
+        let cancel_handle = {
+            let token = cancel.clone();
+            let finished = finished.clone();
+            tokio::task::spawn_blocking(move || {
+                while !finished.load(Ordering::Acquire) {
+                    if token.wait_timeout(Duration::from_millis(25)) {
+                        let _ = cancel_tx.send(());
+                        return;
+                    }
+                }
+            })
+        };
+        struct MarkFinished(Arc<AtomicBool>);
+        impl Drop for MarkFinished {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let _finished_guard = MarkFinished(finished);
 
         'stream: loop {
             tokio::select! {
