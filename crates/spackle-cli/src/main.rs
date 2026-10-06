@@ -42,13 +42,80 @@ enum Command {
 }
 
 #[derive(Debug, Parser)]
-struct DoctorArgs {
+struct EndpointFlags {
     /// Endpoint base URL (defaults to config).
     #[arg(long, env = "SPACKLE_BASE_URL")]
     base_url: Option<String>,
+    /// Request dialect: llamacpp extensions or plain OpenAI fields.
+    #[arg(long, value_enum)]
+    api: Option<ApiArg>,
+    /// Environment variable holding a bearer token for the endpoint.
+    #[arg(long)]
+    api_key_env: Option<String>,
     /// Permit a private-LAN endpoint (loopback is always allowed).
     #[arg(long)]
     allow_private_lan: bool,
+    /// Permit a public https endpoint (off by default: spackle is local-first).
+    #[arg(long)]
+    allow_public_endpoint: bool,
+}
+
+impl EndpointFlags {
+    fn overrides(&self) -> BTreeMap<String, toml::Value> {
+        let mut out: BTreeMap<String, toml::Value> = BTreeMap::new();
+        if let Some(base_url) = &self.base_url {
+            out.insert(
+                "endpoint.base_url".to_owned(),
+                toml::Value::String(base_url.clone()),
+            );
+        }
+        if let Some(api) = self.api {
+            out.insert(
+                "endpoint.api".to_owned(),
+                toml::Value::String(api.as_config_str().to_owned()),
+            );
+        }
+        if let Some(var) = &self.api_key_env {
+            out.insert(
+                "endpoint.api_key_env".to_owned(),
+                toml::Value::String(var.clone()),
+            );
+        }
+        if self.allow_private_lan {
+            out.insert(
+                "endpoint.allow_private_lan".to_owned(),
+                toml::Value::Boolean(true),
+            );
+        }
+        if self.allow_public_endpoint {
+            out.insert(
+                "endpoint.allow_public_endpoint".to_owned(),
+                toml::Value::Boolean(true),
+            );
+        }
+        out
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ApiArg {
+    Llamacpp,
+    Openai,
+}
+
+impl ApiArg {
+    fn as_config_str(self) -> &'static str {
+        match self {
+            Self::Llamacpp => "llamacpp",
+            Self::Openai => "openai",
+        }
+    }
+}
+
+#[derive(Debug, Parser)]
+struct DoctorArgs {
+    #[command(flatten)]
+    endpoint: EndpointFlags,
 }
 
 #[derive(Debug, Parser)]
@@ -56,21 +123,17 @@ struct AskArgs {
     /// The question or instruction.
     prompt: Vec<String>,
 
+    #[command(flatten)]
+    endpoint: EndpointFlags,
     /// Model name or alias served by llama.cpp.
     #[arg(long)]
     model: Option<String>,
-    /// Endpoint base URL (defaults to config).
-    #[arg(long, env = "SPACKLE_BASE_URL")]
-    base_url: Option<String>,
     /// Generation profile name (e.g. fast, balanced, deep).
     #[arg(long)]
     profile: Option<String>,
     /// Reasoning effort override (none, low, medium, high, xhigh).
     #[arg(long, value_enum)]
     reasoning: Option<ReasoningArg>,
-    /// Permit a private-LAN endpoint (loopback is always allowed).
-    #[arg(long)]
-    allow_private_lan: bool,
     /// Extra system prompt prepended to any configured instructions.
     #[arg(long)]
     system: Option<String>,
@@ -121,8 +184,8 @@ async fn main() -> Result<()> {
 }
 
 async fn doctor(args: DoctorArgs) -> Result<()> {
-    let loaded = load_config(args.base_url.as_deref(), args.allow_private_lan)?;
-    let client = build_client(&loaded.config, args.allow_private_lan)?;
+    let loaded = load_config(&args.endpoint)?;
+    let client = build_client(&loaded.config)?;
     let report = client
         .probe()
         .await
@@ -136,7 +199,7 @@ async fn ask(args: AskArgs) -> Result<()> {
         bail!("`spackle ask` needs a prompt; e.g. `spackle ask \"explain this file\" src/main.rs`");
     }
     let prompt = args.prompt.join(" ");
-    let loaded = load_config(args.base_url.as_deref(), args.allow_private_lan)?;
+    let loaded = load_config(&args.endpoint)?;
     for warning in &loaded.warnings {
         eprintln!("warning: {warning}");
     }
@@ -144,7 +207,7 @@ async fn ask(args: AskArgs) -> Result<()> {
     let model = args
         .model
         .unwrap_or_else(|| loaded.config.endpoint.model.clone());
-    let client = build_client(&loaded.config, args.allow_private_lan)?;
+    let client = build_client(&loaded.config)?;
     let transport = LlamaTransport::new(client, model.clone());
 
     // Resolve the active profile (config + CLI overrides).
@@ -257,35 +320,16 @@ async fn ask(args: AskArgs) -> Result<()> {
     }
 }
 
-fn load_config(
-    base_url: Option<&str>,
-    allow_private_lan: bool,
-) -> Result<spackle_core::config::LoadedConfig> {
-    let mut cli_overrides: BTreeMap<String, toml::Value> = BTreeMap::new();
-    if let Some(base_url) = base_url {
-        cli_overrides.insert(
-            "endpoint.base_url".to_owned(),
-            toml::Value::String(base_url.to_owned()),
-        );
-    }
-    if allow_private_lan {
-        cli_overrides.insert(
-            "endpoint.allow_private_lan".to_owned(),
-            toml::Value::Boolean(true),
-        );
-    }
+fn load_config(flags: &EndpointFlags) -> Result<spackle_core::config::LoadedConfig> {
     let start_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut loader = Loader::standard(start_dir);
-    loader.cli_overrides = cli_overrides;
+    loader.cli_overrides = flags.overrides();
     loader
         .load()
         .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
-fn build_client(
-    config: &spackle_core::config::Config,
-    allow_private_lan: bool,
-) -> Result<LlamaCppClient> {
-    LlamaCppClient::with_policy(&config.endpoint.base_url, allow_private_lan)
+fn build_client(config: &spackle_core::config::Config) -> Result<LlamaCppClient> {
+    LlamaCppClient::from_endpoint_config(&config.endpoint)
         .map_err(|error| anyhow::anyhow!(error.to_string()))
 }

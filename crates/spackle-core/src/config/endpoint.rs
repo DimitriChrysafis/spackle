@@ -22,6 +22,21 @@ pub enum EndpointMode {
     Managed,
 }
 
+/// Which Chat Completions dialect the endpoint speaks.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointApi {
+    /// llama.cpp `llama-server`: server-side sampling extensions and
+    /// `chat_template_kwargs` are sent through verbatim.
+    #[default]
+    Llamacpp,
+    /// Generic OpenAI-compatible endpoint: only standard Chat Completions
+    /// fields are sent (the extra llama.cpp fields would be rejected).
+    Openai,
+}
+
 /// Endpoint and model selection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -31,9 +46,16 @@ pub struct EndpointConfig {
     pub base_url: String,
     /// Model name or alias served by llama.cpp.
     pub model: String,
+    /// Request dialect (`llamacpp` or `openai`).
+    pub api: EndpointApi,
+    /// Name of the environment variable holding a bearer token. The value is
+    /// read from the environment at request time; the key itself is never
+    /// stored in config.
+    pub api_key_env: Option<String>,
     /// Permit private-LAN (non-loopback, non-public) endpoints.
     pub allow_private_lan: bool,
-    /// Must remain false. Public inference endpoints are always rejected.
+    /// Permit public endpoints (requires https). Off by default: spackle is
+    /// local-first and should not send code to a remote API accidentally.
     pub allow_public_endpoint: bool,
 }
 
@@ -43,6 +65,8 @@ impl Default for EndpointConfig {
             mode: EndpointMode::default(),
             base_url: super::DEFAULT_BASE_URL.to_owned(),
             model: super::DEFAULT_MODEL.to_owned(),
+            api: EndpointApi::default(),
+            api_key_env: None,
             allow_private_lan: false,
             allow_public_endpoint: false,
         }
@@ -64,6 +88,7 @@ pub struct EndpointInfo {
     pub url: String,
     pub host: String,
     pub port: u16,
+    pub scheme: String,
     pub class: EndpointClass,
 }
 
@@ -100,6 +125,7 @@ impl EndpointInfo {
             url: base_url.to_owned(),
             host,
             port,
+            scheme: url.scheme().to_owned(),
             class,
         })
     }
@@ -158,28 +184,32 @@ pub fn validate(config: &EndpointConfig) -> Result<(), ConfigError> {
     if let Err(issue) = &endpoint {
         issues.push(issue.clone());
     }
-    if config.allow_public_endpoint {
-        issues.push(
-            Issue::new(
-                "endpoint.allow_public_endpoint",
-                "public inference endpoints are not permitted",
-            )
-            .with_hint("remove allow_public_endpoint; spackle only talks to local servers"),
-        );
-    }
     if let Ok(info) = &endpoint {
-        match (info.class, config.allow_private_lan) {
-            (EndpointClass::Public, _) => issues.push(
-                Issue::new(
-                    "endpoint.base_url",
-                    format!("{} resolves to a public endpoint", info.host),
-                )
-                .with_hint(
-                    "point spackle at a loopback server (http://127.0.0.1:PORT) or \
-                     enable a private-LAN endpoint with endpoint.allow_private_lan = true",
-                ),
-            ),
-            (EndpointClass::PrivateLan, false) => issues.push(
+        match info.class {
+            EndpointClass::Public => {
+                if !config.allow_public_endpoint {
+                    issues.push(
+                        Issue::new(
+                            "endpoint.base_url",
+                            format!("{} resolves to a public endpoint", info.host),
+                        )
+                        .with_hint(
+                            "point spackle at a loopback server (http://127.0.0.1:PORT), \
+                             or set endpoint.allow_public_endpoint = true for an \
+                             OpenAI-compatible remote API",
+                        ),
+                    );
+                } else if info.scheme != "https" {
+                    issues.push(
+                        Issue::new(
+                            "endpoint.base_url",
+                            format!("public endpoint {} must use https", info.host),
+                        )
+                        .with_hint("credentials and code must not leave the machine in plaintext"),
+                    );
+                }
+            }
+            EndpointClass::PrivateLan if !config.allow_private_lan => issues.push(
                 Issue::new(
                     "endpoint.base_url",
                     format!("{} is a private-LAN endpoint", info.host),
@@ -187,6 +217,23 @@ pub fn validate(config: &EndpointConfig) -> Result<(), ConfigError> {
                 .with_hint("set endpoint.allow_private_lan = true to permit this endpoint"),
             ),
             _ => {}
+        }
+    }
+    if let Some(var) = &config.api_key_env {
+        let valid = !var.is_empty()
+            && var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && var
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+        if !valid {
+            issues.push(
+                Issue::new(
+                    "endpoint.api_key_env",
+                    format!("`{var}` is not a valid environment variable name"),
+                )
+                .with_hint("use a name like OPENAI_API_KEY"),
+            );
         }
     }
     if config.model.trim().is_empty() {
@@ -271,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn public_endpoints_are_always_rejected() {
+    fn public_endpoints_rejected_without_opt_in() {
         for url in [
             "http://203.0.113.10:8080",
             "http://model-host.example.com:8080",
@@ -289,11 +336,26 @@ mod tests {
     }
 
     #[test]
-    fn allow_public_endpoint_flag_is_rejected() {
-        let mut config = endpoint("http://127.0.0.1:8080");
+    fn public_endpoint_requires_opt_in_and_https() {
+        let mut config = endpoint("https://api.example.com/v1");
         config.allow_public_endpoint = true;
-        let error = validate(&config).expect_err("flag must be rejected");
-        assert!(error.to_string().contains("allow_public_endpoint"));
+        assert!(validate(&config).is_ok());
+
+        let mut config = endpoint("http://api.example.com/v1");
+        config.allow_public_endpoint = true;
+        let error = validate(&config).expect_err("public http must be rejected");
+        assert!(error.to_string().contains("https"), "{error}");
+    }
+
+    #[test]
+    fn api_key_env_name_is_validated() {
+        let mut config = endpoint("http://127.0.0.1:8080");
+        config.api_key_env = Some("OPENAI_API_KEY".to_owned());
+        assert!(validate(&config).is_ok());
+        config.api_key_env = Some("9BAD".to_owned());
+        assert!(validate(&config).is_err());
+        config.api_key_env = Some("HAS SPACE".to_owned());
+        assert!(validate(&config).is_err());
     }
 
     #[test]

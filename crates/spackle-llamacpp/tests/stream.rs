@@ -14,6 +14,7 @@ use spackle_core::agent::{
     FinishReason, InferenceRequest, InferenceTransport, SamplingParams, StreamEvent, ToolDefinition,
 };
 use spackle_core::cancel::CancellationToken;
+use spackle_core::config::endpoint::EndpointApi;
 use spackle_core::message::{Message, ToolCall};
 use spackle_llamacpp::chat_request_body;
 use spackle_llamacpp::client::LlamaCppClient;
@@ -143,6 +144,7 @@ fn request_body_carries_profile_and_parse_tool_calls() {
         &request.tools,
         &request.sampling,
         true,
+        EndpointApi::Llamacpp,
     );
     assert_eq!(body["stream"], serde_json::Value::Bool(true));
     assert_eq!(body["parse_tool_calls"], serde_json::Value::Bool(true));

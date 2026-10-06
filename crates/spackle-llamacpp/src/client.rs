@@ -3,8 +3,9 @@
 //!
 //! Network discipline: endpoints are classified before any request —
 //! loopback by default, private LAN only with an explicit flag, public
-//! endpoints always rejected. Streaming requests carry no global timeout
-//! (local inference is slow), but connect and per-read windows are bounded.
+//! endpoints only when opted in and over https. Streaming requests carry
+//! no global timeout (local inference is slow), but connect and per-read
+//! windows are bounded.
 
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ use serde::Serialize;
 use serde_json::Value;
 use url::Url;
 
-use spackle_core::config::endpoint::{EndpointClass, EndpointInfo};
+use spackle_core::config::endpoint::{EndpointApi, EndpointClass, EndpointConfig, EndpointInfo};
 
 impl From<url::ParseError> for ClientError {
     fn from(err: url::ParseError) -> Self {
@@ -34,6 +35,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone)]
 pub struct LlamaCppClient {
     base_url: Url,
+    api: EndpointApi,
+    /// Bearer token resolved from `endpoint.api_key_env` (never persisted).
+    api_key: Option<String>,
     chat: reqwest::Client,
     probe: reqwest::Client,
 }
@@ -57,14 +61,26 @@ impl LlamaCppClient {
     }
 
     /// Create a client, optionally permitting private-LAN endpoints.
-    /// Public endpoints are always rejected.
+    /// Public endpoints are rejected (see `from_endpoint_config` for the
+    /// full policy surface).
     pub fn with_policy(endpoint: &str, allow_private_lan: bool) -> Result<Self, ClientError> {
-        let info = EndpointInfo::parse(endpoint).map_err(|issue| {
+        let config = EndpointConfig {
+            base_url: endpoint.to_owned(),
+            allow_private_lan,
+            ..Default::default()
+        };
+        Self::from_endpoint_config(&config)
+    }
+
+    /// Create a client from the resolved endpoint configuration. Applies the
+    /// endpoint-class policy and resolves `api_key_env` from the environment.
+    pub fn from_endpoint_config(config: &EndpointConfig) -> Result<Self, ClientError> {
+        let info = EndpointInfo::parse(&config.base_url).map_err(|issue| {
             ClientError::InvalidEndpoint(format!("{}: {}", issue.path, issue.message))
         })?;
         match info.class {
             EndpointClass::Loopback => {}
-            EndpointClass::PrivateLan if allow_private_lan => {}
+            EndpointClass::PrivateLan if config.allow_private_lan => {}
             EndpointClass::PrivateLan => {
                 return Err(ClientError::InvalidEndpoint(format!(
                     "{} {} is a private-LAN endpoint and was not explicitly allowed",
@@ -72,12 +88,40 @@ impl LlamaCppClient {
                 )));
             }
             EndpointClass::Public => {
-                return Err(ClientError::InvalidEndpoint(format!(
-                    "{} is a public endpoint; llama only talks to local llama.cpp servers",
-                    info.host
-                )));
+                if !config.allow_public_endpoint {
+                    return Err(ClientError::InvalidEndpoint(format!(
+                        "{} is a public endpoint; set endpoint.allow_public_endpoint \
+                         to opt in to a remote API",
+                        info.host
+                    )));
+                }
+                if info.scheme != "https" {
+                    return Err(ClientError::InvalidEndpoint(format!(
+                        "public endpoint {} must use https",
+                        info.host
+                    )));
+                }
             }
         }
+        let api_key = match &config.api_key_env {
+            Some(var) => match std::env::var(var) {
+                Ok(value) if !value.is_empty() => Some(value),
+                _ => {
+                    return Err(ClientError::InvalidEndpoint(format!(
+                        "endpoint.api_key_env names `{var}` but it is not set in the environment"
+                    )));
+                }
+            },
+            None => None,
+        };
+        Self::build(&info, config.api, api_key)
+    }
+
+    fn build(
+        info: &EndpointInfo,
+        api: EndpointApi,
+        api_key: Option<String>,
+    ) -> Result<Self, ClientError> {
         let mut base_url = match Url::parse(&info.url) {
             Ok(url) => url,
             Err(err) => return Err(ClientError::InvalidEndpoint(err.to_string())),
@@ -95,6 +139,8 @@ impl LlamaCppClient {
             .build()?;
         Ok(Self {
             base_url,
+            api,
+            api_key,
             chat,
             probe,
         })
@@ -106,13 +152,26 @@ impl LlamaCppClient {
         &self.base_url
     }
 
+    /// The request dialect this endpoint speaks.
+    #[must_use]
+    pub fn api(&self) -> EndpointApi {
+        self.api
+    }
+
+    /// Attach bearer auth when an api key is configured.
+    fn authed(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.api_key {
+            Some(key) => request.bearer_auth(key),
+            None => request,
+        }
+    }
+
     /// Stream a chat completion. Returns the raw byte stream; callers
     /// parse SSE (see `crate::sse`) and the chunk protocol (`crate::wire`).
     pub async fn stream_chat(&self, body: Value) -> Result<PinBoxStream, ClientError> {
         let url = self.base_url.join("v1/chat/completions")?;
         let response = self
-            .chat
-            .post(url)
+            .authed(self.chat.post(url))
             .header("accept", "text/event-stream")
             .json(&body)
             .send()
@@ -131,7 +190,7 @@ impl LlamaCppClient {
     /// Non-streaming chat completion (used by tests and one-shot calls).
     pub async fn chat(&self, body: Value) -> Result<Value, ClientError> {
         let url = self.base_url.join("v1/chat/completions")?;
-        let response = self.chat.post(url).json(&body).send().await?;
+        let response = self.authed(self.chat.post(url)).json(&body).send().await?;
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -143,7 +202,7 @@ impl LlamaCppClient {
     /// List served models and aliases.
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>, ClientError> {
         let url = self.base_url.join("v1/models")?;
-        let response = self.probe.get(url).send().await?;
+        let response = self.authed(self.probe.get(url)).send().await?;
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -185,7 +244,7 @@ impl LlamaCppClient {
     /// Server properties (`GET /props`), when supported.
     pub async fn props(&self) -> Result<Option<Value>, ClientError> {
         let url = self.base_url.join("props")?;
-        let response = self.probe.get(url).send().await?;
+        let response = self.authed(self.probe.get(url)).send().await?;
         let status = response.status();
         if matches!(status.as_u16(), 404 | 501) {
             return Ok(None);
@@ -199,7 +258,7 @@ impl LlamaCppClient {
 
     async fn probe_path(&self, path: &str) -> Result<EndpointProbe, ClientError> {
         let url = self.base_url.join(path.trim_start_matches('/'))?;
-        let response = self.probe.get(url).send().await?;
+        let response = self.authed(self.probe.get(url)).send().await?;
         let status = response.status();
         let bytes = response.bytes().await?;
         let body = serde_json::from_slice(&bytes)

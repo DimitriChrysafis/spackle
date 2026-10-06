@@ -4,7 +4,15 @@ version = 1
 mode = "attach"
 base_url = "http://127.0.0.1:8080"
 model = "qwen3.8-27b-local"
+# Request dialect. "llamacpp" sends llama.cpp sampling extensions and
+# chat_template_kwargs; "openai" restricts the body to standard Chat
+# Completions fields for generic OpenAI-compatible endpoints.
+api = "llamacpp"
+# Environment variable holding a bearer token (e.g. "OPENAI_API_KEY").
+# The key value is read from the environment, never stored here.
+# api_key_env = "OPENAI_API_KEY"
 allow_private_lan = false
+# Public endpoints require this opt-in AND https. Local-first default.
 allow_public_endpoint = false
 
 [generation]

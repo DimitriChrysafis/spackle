@@ -23,10 +23,16 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use spackle_core::agent::{SamplingParams, ToolDefinition, Usage};
+use spackle_core::config::endpoint::EndpointApi;
 use spackle_core::config::generation::ReasoningEffort;
 use spackle_core::message::{ContentBlock, Message, ToolCall};
 
 /// Build the `POST /v1/chat/completions` request body.
+///
+/// `api` selects the dialect: `Llamacpp` sends the full llama.cpp surface
+/// (server-side sampling knobs, `chat_template_kwargs`, `parse_tool_calls`),
+/// while `Openai` restricts the body to standard Chat Completions fields
+/// that generic OpenAI-compatible endpoints accept.
 #[must_use]
 pub fn chat_request_body(
     model: &str,
@@ -35,19 +41,34 @@ pub fn chat_request_body(
     tools: &[ToolDefinition],
     sampling: &SamplingParams,
     stream: bool,
+    api: EndpointApi,
 ) -> Value {
     let mut body = json!({
         "model": model,
         "messages": message_wire(system, messages),
         "stream": stream,
-        "temperature": sampling.temperature,
-        "top_p": sampling.top_p,
-        "top_k": sampling.top_k,
-        "min_p": sampling.min_p,
-        "presence_penalty": sampling.presence_penalty,
-        "repeat_penalty": sampling.repeat_penalty,
-        "max_tokens": sampling.max_tokens,
     });
+    match api {
+        EndpointApi::Llamacpp => {
+            body["temperature"] = json!(sampling.temperature);
+            body["top_p"] = json!(sampling.top_p);
+            body["presence_penalty"] = json!(sampling.presence_penalty);
+            body["top_k"] = json!(sampling.top_k);
+            body["min_p"] = json!(sampling.min_p);
+            body["repeat_penalty"] = json!(sampling.repeat_penalty);
+            body["max_tokens"] = json!(sampling.max_tokens);
+        }
+        EndpointApi::Openai => {
+            // Generic OpenAI-compatible endpoints reject unknown fields and
+            // reasoning models reject `top_p`/penalties outright; sampling
+            // knobs beyond temperature are a llamacpp-only feature.
+            if sampling.temperature != 1.0 {
+                body["temperature"] = json!(sampling.temperature);
+            }
+            // `max_completion_tokens` is the current standard spelling.
+            body["max_completion_tokens"] = json!(sampling.max_tokens);
+        }
+    }
 
     if stream {
         body["stream_options"] = json!({ "include_usage": true });
@@ -68,26 +89,35 @@ pub fn chat_request_body(
                 })
                 .collect(),
         );
-        body["parse_tool_calls"] = json!(true);
+        if api == EndpointApi::Llamacpp {
+            body["parse_tool_calls"] = json!(true);
+        }
     }
 
-    // Qwen3.8 thinking controls travel through the chat template keywords.
-    let mut kwargs: BTreeMap<String, Value> = BTreeMap::new();
-    if let Some(flag) = sampling.enable_thinking {
-        kwargs.insert("enable_thinking".to_owned(), Value::Bool(flag));
-    }
-    if let Some(flag) = sampling.preserve_thinking {
-        kwargs.insert("preserve_thinking".to_owned(), Value::Bool(flag));
-    }
-    if !kwargs.is_empty() {
-        body["chat_template_kwargs"] = Value::Object(
-            kwargs
-                .into_iter()
-                .collect::<serde_json::Map<String, Value>>(),
-        );
+    if api == EndpointApi::Llamacpp {
+        // Qwen3.8 thinking controls travel through the chat template keywords.
+        let mut kwargs: BTreeMap<String, Value> = BTreeMap::new();
+        if let Some(flag) = sampling.enable_thinking {
+            kwargs.insert("enable_thinking".to_owned(), Value::Bool(flag));
+        }
+        if let Some(flag) = sampling.preserve_thinking {
+            kwargs.insert("preserve_thinking".to_owned(), Value::Bool(flag));
+        }
+        if !kwargs.is_empty() {
+            body["chat_template_kwargs"] = Value::Object(
+                kwargs
+                    .into_iter()
+                    .collect::<serde_json::Map<String, Value>>(),
+            );
+        }
     }
     if let Some(effort) = sampling.reasoning_effort {
-        body["reasoning_effort"] = Value::String(reasoning_effort_wire(effort).to_owned());
+        let wire = match api {
+            EndpointApi::Llamacpp => reasoning_effort_wire(effort),
+            // Generic endpoints top out at "high"; clamp rather than error.
+            EndpointApi::Openai => reasoning_effort_wire_openai(effort),
+        };
+        body["reasoning_effort"] = Value::String(wire.to_owned());
     }
     body
 }
@@ -100,6 +130,16 @@ pub fn reasoning_effort_wire(effort: ReasoningEffort) -> &'static str {
         ReasoningEffort::Medium => "medium",
         ReasoningEffort::High => "high",
         ReasoningEffort::Xhigh => "xhigh",
+    }
+}
+
+/// `reasoning_effort` as generic OpenAI-compatible endpoints accept it.
+#[must_use]
+pub fn reasoning_effort_wire_openai(effort: ReasoningEffort) -> &'static str {
+    match effort {
+        ReasoningEffort::Low => "low",
+        ReasoningEffort::Medium => "medium",
+        ReasoningEffort::High | ReasoningEffort::Xhigh => "high",
     }
 }
 
@@ -206,6 +246,9 @@ pub struct Delta {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct DeltaToolCall {
+    /// OpenAI-style choice index: present on generic OpenAI-compatible
+    /// streams, absent on llama.cpp (which never interleaves calls).
+    pub index: Option<u32>,
     pub id: Option<String>,
     pub function: Option<DeltaFunction>,
 }
@@ -280,11 +323,15 @@ pub fn usage_from_wire(wire: &UsageWire) -> Usage {
 /// llama.cpp sends at most one tool-call delta per chunk: the first chunk
 /// for a call carries `id`/`name`; later chunks carry only an `arguments`
 /// fragment. A delta with an `id` or `name` starts a new call; a delta
-/// with neither appends to the currently open call.
+/// with neither appends to the currently open call. Streams that carry an
+/// OpenAI-style `index` may interleave parallel calls; then the open call
+/// is tracked per index instead of globally.
 pub struct ToolCallAssembler {
     calls: Vec<ToolCall>,
     /// Open call currently receiving argument fragments, if any.
     open: Option<usize>,
+    /// Wire `index` -> position in `calls` for interleaved streams.
+    open_by_index: Vec<Option<usize>>,
     fallback_seed: String,
 }
 
@@ -294,6 +341,7 @@ impl ToolCallAssembler {
         Self {
             calls: Vec::new(),
             open: None,
+            open_by_index: Vec::new(),
             fallback_seed: request_seed,
         }
     }
@@ -323,9 +371,23 @@ impl ToolCallAssembler {
                 });
                 let index = self.calls.len() - 1;
                 self.open = Some(index);
+                if let Some(wire_index) = item.index {
+                    let slot = wire_index as usize;
+                    if self.open_by_index.len() <= slot {
+                        self.open_by_index.resize(slot + 1, None);
+                    }
+                    self.open_by_index[slot] = Some(index);
+                }
                 index
             } else {
-                match self.open {
+                // Continuation fragment: on indexed streams resolve through
+                // the index so interleaved parallel calls do not mix
+                // arguments; otherwise append to the open call.
+                let resolved = item
+                    .index
+                    .and_then(|i| self.open_by_index.get(i as usize).copied().flatten())
+                    .or(self.open);
+                match resolved {
                     Some(index) => index,
                     None => {
                         // Defensive: an arguments-only delta with no open
@@ -419,6 +481,7 @@ mod tests {
             &tools,
             &sampling,
             true,
+            EndpointApi::Llamacpp,
         );
         assert_eq!(body["model"], "qwen3.8-27b-local");
         assert_eq!(body["stream"], true);
@@ -432,6 +495,70 @@ mod tests {
         assert_eq!(body["messages"][1]["role"], "user");
         assert_eq!(body["max_tokens"], 8192);
         assert_eq!(body["presence_penalty"], 1.5);
+    }
+
+    #[test]
+    fn openai_body_omits_llamacpp_extensions() {
+        let sampling = SamplingParams {
+            temperature: 0.7,
+            top_p: 1.0,
+            top_k: 20,
+            min_p: 0.0,
+            presence_penalty: 0.0,
+            repeat_penalty: 1.0,
+            max_tokens: 8192,
+            enable_thinking: Some(true),
+            preserve_thinking: Some(true),
+            reasoning_effort: Some(ReasoningEffort::Xhigh),
+        };
+        let tools = vec![CoreTool {
+            name: "read_file".to_owned(),
+            description: "Read a file".to_owned(),
+            parameters: json!({"type": "object"}),
+        }];
+        let body = chat_request_body(
+            "gpt-5-mini",
+            "system prompt",
+            &[spackle_core::message::Message::user("hi")],
+            &tools,
+            &sampling,
+            true,
+            EndpointApi::Openai,
+        );
+        assert_eq!(body["max_completion_tokens"], 8192);
+        assert_eq!(body["max_tokens"], Value::Null);
+        assert_eq!(body["top_k"], Value::Null);
+        assert_eq!(body["repeat_penalty"], Value::Null);
+        assert_eq!(body["min_p"], Value::Null);
+        // Non-default temperature is sent; defaults stay implicit.
+        assert_eq!(body["temperature"], json!(0.7f32));
+        assert_eq!(body["top_p"], Value::Null);
+        assert_eq!(body["presence_penalty"], Value::Null);
+        assert_eq!(body["parse_tool_calls"], Value::Null);
+        assert_eq!(body["chat_template_kwargs"], Value::Null);
+        assert_eq!(body["reasoning_effort"], "high");
+        assert_eq!(body["tools"][0]["function"]["name"], "read_file");
+    }
+
+    #[test]
+    fn indexed_tool_call_deltas_stay_separate() {
+        // Interleaved parallel calls (OpenAI streams each fragment with an
+        // explicit index) must not merge arguments across calls.
+        let mut assembler = ToolCallAssembler::new("seed".to_owned());
+        for item in [
+            json!({"index": 0, "id": "a", "function": {"name": "read_file", "arguments": "{\"p"}}),
+            json!({"index": 1, "id": "b", "function": {"name": "grep", "arguments": "{\"q"}}),
+            json!({"index": 0, "function": {"arguments": "at\":\"x\"}"}}),
+            json!({"index": 1, "function": {"arguments": "\":\"y\"}"}}),
+        ] {
+            let delta: Delta =
+                serde_json::from_value(json!({"tool_calls": [item]})).expect("delta parses");
+            assembler.apply(&delta);
+        }
+        let calls = assembler.finish();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].arguments, json!({"pat": "x"}));
+        assert_eq!(calls[1].arguments, json!({"q": "y"}));
     }
 
     #[test]
