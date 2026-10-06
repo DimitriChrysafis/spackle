@@ -308,11 +308,13 @@ impl InferenceTransport for LlamaTransport {
                     assembler.apply_chunk(&chunk, &events);
                 }
                 Err(err) => {
+                    // An unterminated trailing payload means the connection
+                    // was cut mid-chunk — retryable, unlike a complete SSE
+                    // event with bad JSON (a real protocol violation).
                     cancel_handle.abort();
-                    return Err(ClientError::Malformed(format!(
-                        "unparseable final SSE payload `{payload}`: {err}"
-                    ))
-                    .into());
+                    return Err(TransportError::Transient(format!(
+                        "stream ended mid-payload: {err}"
+                    )));
                 }
             }
         }

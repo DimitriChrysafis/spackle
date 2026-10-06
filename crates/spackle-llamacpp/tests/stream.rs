@@ -528,6 +528,26 @@ async fn connection_refused_is_transient() {
     );
 }
 
+#[tokio::test]
+async fn truncated_tail_is_transient_not_fatal() {
+    // Server closes the body mid-chunk: the leftover buffer must not be
+    // parsed as a complete payload (that failure mode is a dropped
+    // connection, which is retryable, not a protocol violation).
+    let mut script = vec![text_chunk("partial")];
+    script.push(
+        b"data: {\"id\":\"cmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"cut"
+            .to_vec(),
+    );
+    let base_url = serve_script(script).await;
+    let err = run_infer(&base_url, base_request(), CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, spackle_core::agent::TransportError::Transient(_)),
+        "{err:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Endpoint policy
 // ---------------------------------------------------------------------------
