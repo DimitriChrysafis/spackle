@@ -1,6 +1,6 @@
 # Offline inventory
 
-Prepared on 2026-08-21 for `/Users/dofa/Documents/GitHub/spackle`.
+Prepared on 2026-08-21 for the spackle repository.
 
 ## Development inputs
 
