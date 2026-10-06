@@ -1,0 +1,5 @@
+prompt = """money.py: total(["0.10", "0.20", "0.30"]) returns 0.6000000000000001
+instead of 0.6. The tests also require total to handle thousands of entries
+without drift. Fix it so `python3 -m unittest -q` passes."""
+check = """python3 -m unittest -q"""
+timeout_seconds = 300

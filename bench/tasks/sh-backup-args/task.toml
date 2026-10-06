@@ -1,0 +1,6 @@
+prompt = """backup.sh takes SRC and DST and should copy SRC to DST then print
+"copied". `./check.sh` runs it and validates the copy happened at the right
+path — currently it copies to the wrong place because of an argument bug.
+Fix it so `sh check.sh` passes."""
+check = """sh check.sh"""
+timeout_seconds = 300

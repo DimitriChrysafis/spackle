@@ -1,0 +1,5 @@
+prompt = """test_api.py fails: api.get_user(2) returns the wrong row.
+api.py itself looks fine at a glance — the actual bug is elsewhere in the
+codebase. Find it, fix it, and get `python3 -m unittest -q` passing."""
+check = """python3 -m unittest -q"""
+timeout_seconds = 300

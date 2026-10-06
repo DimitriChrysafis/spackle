@@ -1,0 +1,5 @@
+prompt = """flat.py: flatten([[1, 2], [3]]) returns [1, 2, 3] correctly, but
+flatten([[[1]]]) returns [[1]] — it only unwraps one level of nesting. The
+tests require arbitrary depth. Fix it so `python3 -m unittest -q` passes."""
+check = """python3 -m unittest -q"""
+timeout_seconds = 300

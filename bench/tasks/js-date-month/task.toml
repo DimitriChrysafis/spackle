@@ -1,0 +1,5 @@
+prompt = """dates.js: format("2024-03-15") returns "2024-2-15" — the month is
+off by one because Date months are zero-based and the code adds nothing.
+Run `node --test`. Fix the bug."""
+check = """node --test"""
+timeout_seconds = 300

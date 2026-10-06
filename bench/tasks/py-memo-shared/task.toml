@@ -1,0 +1,5 @@
+prompt = """paths.py: results are wrong when different inputs share the call —
+paths(3, 3) should return 6 and paths(4, 4) should return 20, but the
+memoization leaks across inputs. Fix it so `python3 -m unittest -q` passes."""
+check = """python3 -m unittest -q"""
+timeout_seconds = 300
