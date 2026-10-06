@@ -1,0 +1,14 @@
+/target/
+/.spackle/
+/.DS_Store
+*.log
+
+# Vendored crate sources live on disk for offline builds but are not
+# checked in (see .cargo/config.toml).
+/vendor/
+
+# Kept on this machine for offline work; do not push these third-party copies.
+/offline/reference-src/
+/offline/runtime/llama.cpp-*
+/offline/runtime/bin/
+/offline/models/

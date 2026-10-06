@@ -1,0 +1,60 @@
+{
+  "captured_at": "2026-08-21T13:42:00+03:00",
+  "base_url": "http://127.0.0.1:8080",
+  "health": { "status": 200, "body": { "status": "ok" } },
+  "model": {
+    "id": "qwen3.8-27b-local",
+    "meta": {
+      "vocab_type": 2,
+      "n_vocab": 248320,
+      "n_ctx": 150016,
+      "n_ctx_train": 262144,
+      "n_embd": 5120,
+      "n_params": 27320697856,
+      "size": 16799719424,
+      "ftype": "Q4_K - Medium"
+    }
+  },
+  "props": {
+    "total_slots": 1,
+    "modalities": { "vision": true, "video": true, "audio": false },
+    "n_ctx": 150016,
+    "default_params": {
+      "temperature": 1.0,
+      "top_k": 20,
+      "top_p": 0.949999988079071,
+      "min_p": 0.05000000074505806,
+      "repeat_penalty": 1.0,
+      "presence_penalty": 0.0,
+      "reasoning_format": "none",
+      "speculative_types": "none"
+    }
+  },
+  "slots": [
+    { "id": 0, "n_ctx": 150016, "speculative": false }
+  ],
+  "input_token_probe": {
+    "status": 200,
+    "body": { "input_tokens": 55, "object": "response.input_tokens" }
+  },
+  "metrics": {
+    "status": 501,
+    "body": {
+      "error": {
+        "code": 501,
+        "message": "This server does not support metrics endpoint. Start it with `--metrics`",
+        "type": "not_supported_error"
+      }
+    }
+  },
+  "version": {
+    "status": 404,
+    "body": {
+      "error": {
+        "code": 404,
+        "message": "File Not Found",
+        "type": "not_found_error"
+      }
+    }
+  }
+}

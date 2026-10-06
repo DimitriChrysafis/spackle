@@ -1,0 +1,19 @@
+[package]
+name = "spackle-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+crossterm.workspace = true
+futures-util.workspace = true
+spackle-core = { path = "../spackle-core" }
+ratatui.workspace = true
+serde.workspace = true
+textwrap.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true

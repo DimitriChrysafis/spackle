@@ -1,0 +1,63 @@
+[package]
+name = "spackle-offline-deps"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# This non-shipping crate intentionally locks likely implementation and test
+# dependencies into Cargo.lock/vendor so the main agent can work without Wi-Fi.
+[dependencies]
+assert_cmd = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+criterion = { workspace = true, optional = true }
+directories = { workspace = true, optional = true }
+eventsource-stream = { workspace = true, optional = true }
+fs2 = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+humantime-serde = { workspace = true, optional = true }
+insta = { workspace = true, optional = true }
+mime_guess = { workspace = true, optional = true }
+portable-pty = { workspace = true, optional = true }
+predicates = { workspace = true, optional = true }
+secrecy = { workspace = true, optional = true }
+serde_ignored = { workspace = true, optional = true }
+similar = { workspace = true, optional = true }
+sysinfo = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+toml_edit = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+which = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
+
+[features]
+cache-all = [
+    "dep:assert_cmd",
+    "dep:async-trait",
+    "dep:base64",
+    "dep:criterion",
+    "dep:directories",
+    "dep:eventsource-stream",
+    "dep:fs2",
+    "dep:hex",
+    "dep:http",
+    "dep:humantime-serde",
+    "dep:insta",
+    "dep:mime_guess",
+    "dep:portable-pty",
+    "dep:predicates",
+    "dep:secrecy",
+    "dep:serde_ignored",
+    "dep:similar",
+    "dep:sysinfo",
+    "dep:toml",
+    "dep:toml_edit",
+    "dep:url",
+    "dep:uuid",
+    "dep:which",
+    "dep:zeroize",
+]

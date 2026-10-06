@@ -1,0 +1,25 @@
+[package]
+name = "spackle-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+diffy.workspace = true
+globset.workspace = true
+grep-regex.workspace = true
+grep-searcher.workspace = true
+ignore.workspace = true
+spackle-core = { path = "../spackle-core" }
+regex.workspace = true
+serde.workspace = true
+sha2.workspace = true
+shell-words.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

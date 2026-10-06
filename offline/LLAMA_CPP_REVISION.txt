@@ -1,0 +1,3 @@
+upstream=https://github.com/ggml-org/llama.cpp.git
+commit=5b6ddc9675a9c2d10c4458a510b09674a3decec1
+captured_at=2026-08-21T13:40:00+03:00

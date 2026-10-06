@@ -1,0 +1,24 @@
+[package]
+name = "spackle-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+directories.workspace = true
+fs2.workspace = true
+futures-util.workspace = true
+url.workspace = true
+schemars.workspace = true
+serde.workspace = true
+toml.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
