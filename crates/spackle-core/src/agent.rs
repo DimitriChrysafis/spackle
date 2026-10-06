@@ -535,8 +535,26 @@ pub async fn run_turn(
             {
                 Ok(result) => break result,
                 Err(TransportError::Transient(message)) if retries_left > 0 => {
+                    let attempt = context.config.max_model_retries - retries_left;
                     retries_left -= 1;
-                    tracing::warn!(error = %message, "transient inference error; retrying");
+                    // Exponential backoff with a hard cap: a restarting engine
+                    // needs seconds, not an immediate re-hit.
+                    let delay =
+                        Duration::from_secs(1 << attempt.min(5)).min(Duration::from_secs(30));
+                    tracing::warn!(error = %message, retry_in_s = delay.as_secs(), "transient inference error; retrying");
+                    let wake = Instant::now() + delay;
+                    while Instant::now() < wake {
+                        if cancel.is_cancelled() {
+                            events.push(AgentEvent::turn_cancelled(session_id, step));
+                            return Err(agent_error(
+                                AgentState::Cancelling,
+                                "cancelled by user".to_owned(),
+                                events,
+                                transcript,
+                            ));
+                        }
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
                     continue;
                 }
                 Err(error) => {

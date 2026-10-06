@@ -71,6 +71,11 @@ pub(crate) struct EvalArgs {
     #[arg(long)]
     pub max_steps: Option<u32>,
 
+    /// Transient-error retries per inference call (with backoff). A local
+    /// engine restart takes a while; the default forgives that.
+    #[arg(long, default_value_t = 6)]
+    pub retries: u32,
+
     /// Ablation: disable the repeated-call loop guard.
     #[arg(long)]
     pub no_loop_guard: bool,
@@ -170,6 +175,7 @@ pub async fn run(args: EvalArgs) -> Result<()> {
     }
 
     let mut loop_config = LoopConfig::from(&loaded.config.agent);
+    loop_config.max_model_retries = args.retries;
     if let Some(max_steps) = args.max_steps {
         loop_config.max_steps = max_steps;
     }
