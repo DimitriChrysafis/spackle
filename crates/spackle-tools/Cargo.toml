@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 diffy.workspace = true
 globset.workspace = true
 grep-regex.workspace = true
@@ -14,6 +15,7 @@ ignore.workspace = true
 spackle-core = { path = "../spackle-core" }
 regex.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 shell-words.workspace = true
 tempfile.workspace = true

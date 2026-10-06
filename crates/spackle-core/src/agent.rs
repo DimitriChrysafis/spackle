@@ -231,6 +231,16 @@ pub enum ToolError {
     Cancelled,
 }
 
+impl std::fmt::Display for ToolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(message) => f.write_str(message),
+            Self::Denied(message) => write!(f, "denied: {message}"),
+            Self::Cancelled => f.write_str("cancelled"),
+        }
+    }
+}
+
 /// One tool implementation (implemented by spackle-tools).
 #[async_trait]
 pub trait ToolExecutor: Send + Sync {
@@ -244,7 +254,9 @@ pub trait ToolExecutor: Send + Sync {
     }
 
     /// True when the approval gate must be consulted before execution.
-    fn requires_approval(&self) -> bool {
+    /// Receives the call so tools can gate selectively (e.g. reads only
+    /// when the target looks like a secret file).
+    fn requires_approval(&self, _call: &ToolCall) -> bool {
         false
     }
 
@@ -659,7 +671,7 @@ async fn execute_tool_calls(
             let (text, is_error) = match executor {
                 None => (format!("unknown tool `{}`", call.name), true),
                 Some(executor) => {
-                    if executor.requires_approval() {
+                    if executor.requires_approval(&call) {
                         let detail = executor.describe(&call);
                         let decision = context.gate.decide(&call.name, &detail);
                         match decision {
@@ -926,7 +938,7 @@ mod tests {
         fn name(&self) -> &str {
             "approving"
         }
-        fn requires_approval(&self) -> bool {
+        fn requires_approval(&self, _call: &ToolCall) -> bool {
             true
         }
         async fn execute(

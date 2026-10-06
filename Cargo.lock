@@ -2520,14 +2520,17 @@ dependencies = [
  "anyhow",
  "clap",
  "futures-util",
+ "serde",
  "serde_json",
  "spackle-core",
  "spackle-llamacpp",
  "spackle-tools",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",
  "tracing-subscriber",
+ "which",
 ]
 
 [[package]]
@@ -2604,6 +2607,7 @@ dependencies = [
 name = "spackle-tools"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "diffy",
  "globset",
  "grep-regex",
@@ -2612,6 +2616,7 @@ dependencies = [
  "proptest",
  "regex",
  "serde",
+ "serde_json",
  "sha2",
  "shell-words",
  "spackle-core",
