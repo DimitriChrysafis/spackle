@@ -44,7 +44,6 @@ struct Cli {
 
 mod eval;
 
-
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Probe the attached llama.cpp server without modifying it.
@@ -160,6 +159,9 @@ struct AskArgs {
     /// Maximum generated tokens for this call.
     #[arg(long)]
     max_tokens: Option<u32>,
+    /// Agent steps (inference calls) before the turn is stopped.
+    #[arg(long)]
+    max_steps: Option<u32>,
     /// Approve every tool action without prompting (use with care).
     #[arg(long)]
     yes: bool,
@@ -363,7 +365,13 @@ async fn ask(args: AskArgs) -> Result<()> {
         system_prompt: system,
         tools_schema,
         sampling,
-        config: (&loaded.config.agent).into(),
+        config: {
+            let mut config: spackle_core::agent::LoopConfig = (&loaded.config.agent).into();
+            if let Some(max_steps) = args.max_steps {
+                config.max_steps = max_steps;
+            }
+            config
+        },
     };
 
     // Session journal under the state directory.
