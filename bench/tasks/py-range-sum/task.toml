@@ -1,0 +1,4 @@
+prompt = """stats.py's total(n) should sum 1..n inclusive, but total(10)
+returns 45. Fix it so `python3 -m unittest -q` passes."""
+check = """python3 -m unittest -q"""
+timeout_seconds = 300

@@ -1,0 +1,4 @@
+prompt = """arr.js: sum([1,2,3]) should be 6 but returns NaN — the accumulator
+starts as undefined. Run `node --test` to see the failure. Fix the bug."""
+check = """node --test"""
+timeout_seconds = 300

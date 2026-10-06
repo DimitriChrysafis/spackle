@@ -1,0 +1,4 @@
+prompt = """metrics.py: mean([]) crashes with ZeroDivisionError; it should
+return 0.0. mean([2,4]) works fine. Fix it so `python3 -m unittest -q` passes."""
+check = """python3 -m unittest -q"""
+timeout_seconds = 300

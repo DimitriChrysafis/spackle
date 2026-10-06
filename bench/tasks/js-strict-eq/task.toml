@@ -1,0 +1,4 @@
+prompt = """eq.js: same("1", 1) should be false but returns true — loose
+comparison. Run `node --test` to see it. Fix the bug."""
+check = """node --test"""
+timeout_seconds = 300

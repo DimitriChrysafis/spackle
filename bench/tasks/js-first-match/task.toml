@@ -1,0 +1,5 @@
+prompt = """find.js: findName(users, "bo") should return the user named "bob"
+but returns undefined — it compares the whole name, not a substring.
+Run `node --test`. Fix the bug."""
+check = """node --test"""
+timeout_seconds = 300

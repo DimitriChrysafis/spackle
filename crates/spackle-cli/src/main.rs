@@ -42,6 +42,8 @@ struct Cli {
     command: Command,
 }
 
+mod eval;
+
 
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -49,6 +51,8 @@ enum Command {
     Doctor(DoctorArgs),
     /// Ask the model a single question (streamed to the terminal).
     Ask(AskArgs),
+    /// Run the task benchmark against the configured endpoint.
+    Eval(eval::EvalArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -205,6 +209,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Doctor(args) => doctor(args).await,
         Command::Ask(args) => ask(args).await,
+        Command::Eval(args) => eval::run(args).await,
     }
 }
 

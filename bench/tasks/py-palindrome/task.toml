@@ -1,0 +1,5 @@
+prompt = """words.py: is_palindrome("Race car") should be True but returns
+False, and is_palindrome("A man a plan a canal Panama") also fails.
+Fix it so `python3 -m unittest -q` passes."""
+check = """python3 -m unittest -q"""
+timeout_seconds = 300

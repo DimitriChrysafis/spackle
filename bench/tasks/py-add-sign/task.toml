@@ -1,0 +1,4 @@
+prompt = """calc.py has a bug: add(2, 3) returns -1 instead of 5.
+Fix the bug so `python3 -m unittest -q` passes."""
+check = """python3 -m unittest -q"""
+timeout_seconds = 300

@@ -1,0 +1,6 @@
+prompt = """clamp.rs: clamp(15, 0, 10) should return 10 but returns 0 — the
+min/max arguments to the checks are swapped.
+Build and run: rustc --edition 2021 --test clamp.rs -o clamp_test && ./clamp_test
+Fix the bug."""
+check = """rustc --edition 2021 --test clamp.rs -o clamp_test && ./clamp_test"""
+timeout_seconds = 300

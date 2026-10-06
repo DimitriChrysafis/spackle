@@ -1,0 +1,4 @@
+prompt = """vowels.py: count_vowels("hello") should return 2 but returns 0.
+The set membership check is inverted. Fix it so `python3 -m unittest -q` passes."""
+check = """python3 -m unittest -q"""
+timeout_seconds = 300

@@ -1,0 +1,4 @@
+prompt = """range.js: range(1, 5) should return [1,2,3,4,5] but drops the
+last element. Run `node --test`. Fix the bug."""
+check = """node --test"""
+timeout_seconds = 300

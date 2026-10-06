@@ -1,0 +1,6 @@
+prompt = """counter.rs: count_char("banana", 'a') should be 3 but returns 1 —
+the accumulator is overwritten instead of incremented.
+Build and run: rustc --edition 2021 --test counter.rs -o counter_test && ./counter_test
+Fix the bug."""
+check = """rustc --edition 2021 --test counter.rs -o counter_test && ./counter_test"""
+timeout_seconds = 300

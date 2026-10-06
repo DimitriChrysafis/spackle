@@ -1,0 +1,5 @@
+prompt = """text.py: reverse_words("hello world foo") should return
+"foo world hello" but returns the input unchanged order reversed char-wise.
+Fix it so `python3 -m unittest -q` passes."""
+check = """python3 -m unittest -q"""
+timeout_seconds = 300

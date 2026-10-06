@@ -1,0 +1,5 @@
+prompt = """cart.py: every call to empty_cart() should return a fresh
+list, but items leak between calls because the default argument is shared.
+Fix it so `python3 -m unittest -q` passes."""
+check = """python3 -m unittest -q"""
+timeout_seconds = 300

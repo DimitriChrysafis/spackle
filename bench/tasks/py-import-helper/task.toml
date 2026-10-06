@@ -1,0 +1,5 @@
+prompt = """main.py imports `slugify` from helpers.py but helpers.py only
+defines `slug`. `python3 main.py hello` crashes. Fix the bug so
+`python3 check.py` passes."""
+check = """python3 check.py"""
+timeout_seconds = 300

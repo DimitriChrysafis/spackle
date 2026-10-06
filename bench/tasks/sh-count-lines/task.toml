@@ -1,0 +1,6 @@
+prompt = """count.sh should print the number of lines in each file argument,
+but word-splitting breaks on filenames with spaces: `sh count.sh "a b.txt"` fails.
+There is a fixture file `a b.txt` in the repo. Run `sh check.sh` to see the bug.
+Fix it."""
+check = """sh check.sh"""
+timeout_seconds = 300
