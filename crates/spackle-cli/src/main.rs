@@ -1,25 +1,34 @@
 //! `spackle` — local llama.cpp coding-agent harness (CLI entry point).
 //!
-//! Phase 2 commands:
+//! Commands:
 //! - `spackle doctor` — probe the attached server (non-mutating).
-//! - `spackle ask` — single prompt against the model, streaming to the
-//!   terminal, full config precedence and endpoint policy applied.
+//! - `spackle ask` — run one agent turn with the workspace tools, streaming
+//!   to the terminal, with approval prompts and a session journal.
 
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use spackle_core::agent::{
-    DenyAllGate, SamplingParams, StreamEvent, ToolDefinition, ToolRegistry, TurnContext,
+    AllowAllGate, ApprovalDecision, ApprovalGate, DenyAllGate, SamplingParams, StreamEvent,
+    ToolDefinition, ToolRegistry, TurnContext, run_turn,
 };
 use spackle_core::cancel::CancellationToken;
 use spackle_core::config::Loader;
+use spackle_core::config::agent::{ConfirmationMode, ConfirmationPolicy};
 use spackle_core::config::generation::ReasoningEffort;
-use spackle_core::message::Message;
+use spackle_core::event::AgentEvent;
+use spackle_core::message::{ContentBlock, Message};
+use spackle_core::prompt::{SystemPrompt, SystemPromptInput};
+use spackle_core::session::{
+    SessionId, SessionPaths, SessionRecord, SessionRecordKind, SessionStore,
+};
 use spackle_llamacpp::{LlamaCppClient, LlamaTransport};
+use spackle_tools::{WorkspaceRoot, standard_registry, standard_schemas};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -33,6 +42,7 @@ struct Cli {
     command: Command,
 }
 
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Probe the attached llama.cpp server without modifying it.
@@ -42,7 +52,7 @@ enum Command {
 }
 
 #[derive(Debug, Parser)]
-struct EndpointFlags {
+pub(crate) struct EndpointFlags {
     /// Endpoint base URL (defaults to config).
     #[arg(long, env = "SPACKLE_BASE_URL")]
     base_url: Option<String>,
@@ -125,7 +135,10 @@ struct AskArgs {
 
     #[command(flatten)]
     endpoint: EndpointFlags,
-    /// Model name or alias served by llama.cpp.
+    /// Workspace directory to sandbox tools into (default: config or cwd).
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+    /// Model name or alias served by the endpoint.
     #[arg(long)]
     model: Option<String>,
     /// Generation profile name (e.g. fast, balanced, deep).
@@ -143,10 +156,22 @@ struct AskArgs {
     /// Maximum generated tokens for this call.
     #[arg(long)]
     max_tokens: Option<u32>,
+    /// Approve every tool action without prompting (use with care).
+    #[arg(long)]
+    yes: bool,
+    /// Disable tools entirely (plain chat).
+    #[arg(long)]
+    no_tools: bool,
+    /// Do not write a session journal.
+    #[arg(long)]
+    no_journal: bool,
+    /// Continue the existing session journal for this workspace.
+    #[arg(long)]
+    resume: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum ReasoningArg {
+pub(crate) enum ReasoningArg {
     None,
     Low,
     Medium,
@@ -194,9 +219,52 @@ async fn doctor(args: DoctorArgs) -> Result<()> {
     Ok(())
 }
 
+/// Approval gate that maps the tool `describe` prefix onto the configured
+/// confirmation policy and asks on the terminal when the mode is `ask`.
+struct PolicyGate {
+    policy: ConfirmationPolicy,
+    interactive: bool,
+}
+
+impl PolicyGate {
+    fn mode_for(&self, detail: &str) -> ConfirmationMode {
+        let kind = detail.split(':').next().unwrap_or("");
+        match kind {
+            "secret" => self.policy.secret_files,
+            "command-destructive" => self.policy.destructive,
+            "command-network" => self.policy.network_commands,
+            _ => self.policy.writes,
+        }
+    }
+}
+
+impl ApprovalGate for PolicyGate {
+    fn decide(&self, tool: &str, detail: &str) -> ApprovalDecision {
+        match self.mode_for(detail) {
+            ConfirmationMode::Allow => ApprovalDecision::Allow,
+            ConfirmationMode::Deny => ApprovalDecision::Deny,
+            ConfirmationMode::Ask => {
+                if !self.interactive {
+                    return ApprovalDecision::Deny;
+                }
+                eprint!("\n[approve {tool}] {detail}\nallow? [y/N] ");
+                let _ = std::io::stderr().flush();
+                let mut line = String::new();
+                match std::io::stdin().read_line(&mut line) {
+                    Ok(_) => match line.trim().to_lowercase().as_str() {
+                        "y" | "yes" => ApprovalDecision::Allow,
+                        _ => ApprovalDecision::Deny,
+                    },
+                    Err(_) => ApprovalDecision::Deny,
+                }
+            }
+        }
+    }
+}
+
 async fn ask(args: AskArgs) -> Result<()> {
     if args.prompt.is_empty() {
-        bail!("`spackle ask` needs a prompt; e.g. `spackle ask \"explain this file\" src/main.rs`");
+        bail!("`spackle ask` needs a prompt; e.g. `spackle ask \"explain this file\"`");
     }
     let prompt = args.prompt.join(" ");
     let loaded = load_config(&args.endpoint)?;
@@ -206,6 +274,7 @@ async fn ask(args: AskArgs) -> Result<()> {
 
     let model = args
         .model
+        .clone()
         .unwrap_or_else(|| loaded.config.endpoint.model.clone());
     let client = build_client(&loaded.config)?;
     let transport = LlamaTransport::new(client, model.clone());
@@ -238,36 +307,96 @@ async fn ask(args: AskArgs) -> Result<()> {
         sampling.max_tokens = max_tokens;
     }
 
-    // System prompt: explicit flag first, then project instructions.
+    // Workspace: flag, then config, then current directory.
+    let workspace = match (&args.workspace, &loaded.config.agent.workspace) {
+        (Some(path), _) => path.clone(),
+        (None, Some(path)) => PathBuf::from(path),
+        (None, None) => std::env::current_dir().context("cannot determine current directory")?,
+    };
+    let root = WorkspaceRoot::new(&workspace)
+        .with_context(|| format!("workspace {} is not usable", workspace.display()))?;
+
+    let (registry, tools_schema) = if args.no_tools {
+        (ToolRegistry::new(), Vec::<ToolDefinition>::new())
+    } else {
+        (standard_registry(root.clone()), standard_schemas())
+    };
+
+    // System prompt: assembled prompt + optional extra instructions.
+    let assembled = SystemPrompt::assemble(&SystemPromptInput {
+        project_instructions: loaded.instructions.clone(),
+        workspace: Some(root.as_path().to_string_lossy().into_owned()),
+        model: Some(model.clone()),
+        platform: Some(std::env::consts::OS.to_owned()),
+        profile: Some(profile_name.clone()),
+        toolchain: detect_toolchain(),
+    });
     let mut system = args.system.clone().unwrap_or_default();
-    if let Some(instructions) = &loaded.instructions {
-        if system.is_empty() {
-            system = instructions.clone();
-        } else {
-            system = format!("{system}\n\n{instructions}");
-        }
-    }
     if system.is_empty() {
-        system = "You are spackle, a careful local coding agent.".to_owned();
+        system = assembled.as_str().to_owned();
+    } else {
+        system = format!("{system}\n\n{}", assembled.as_str());
     }
 
-    let registry = ToolRegistry::new();
-    let gate = DenyAllGate;
+    let interactive = stderr_is_terminal();
+    let gate: Box<dyn ApprovalGate> = if args.yes {
+        Box::new(AllowAllGate)
+    } else if interactive {
+        Box::new(PolicyGate {
+            policy: loaded.config.agent.confirmations,
+            interactive: true,
+        })
+    } else {
+        Box::new(DenyAllGate)
+    };
+
     let context = TurnContext {
         transport: &transport,
         tools: &registry,
-        gate: &gate,
+        gate: gate.as_ref(),
         model: model.clone(),
         system_prompt: system,
-        tools_schema: Vec::<ToolDefinition>::new(),
+        tools_schema,
         sampling,
         config: (&loaded.config.agent).into(),
     };
 
+    // Session journal under the state directory.
+    let session_id = SessionId::from_workspace(root.as_path());
+    let paths = SessionPaths::from_state_dir(&loaded.state_dir);
+    let mut store = if args.no_journal {
+        None
+    } else {
+        match SessionStore::open(&paths.sessions_dir, session_id.clone()) {
+            Ok(store) => Some(store),
+            Err(error) => {
+                eprintln!("warning: session journal unavailable: {error}");
+                None
+            }
+        }
+    };
+    let mut transcript: Vec<Message> = Vec::new();
+    if args.resume
+        && let Some(store) = &store
+    {
+        match store.load_transcript() {
+            Ok(prior) => {
+                if !prior.messages.is_empty() {
+                    eprintln!(
+                        "(resuming {} prior messages from {})",
+                        prior.messages.len(),
+                        store.path().display()
+                    );
+                }
+                transcript = prior.messages;
+            }
+            Err(error) => eprintln!("warning: cannot resume session: {error}"),
+        }
+    }
+    journal_message(&mut store, &session_id, "user", &prompt, &model);
+
     let show_reasoning = args.show_reasoning;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
-
-    // Stream deltas to the terminal as they arrive.
     let printer = tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             let mut out = std::io::stdout();
@@ -293,12 +422,42 @@ async fn ask(args: AskArgs) -> Result<()> {
     });
 
     let cancel = CancellationToken::new();
-    let mut transcript: Vec<Message> = Vec::new();
-    let user = Message::user(&prompt);
-    let outcome =
-        spackle_core::agent::run_turn(&context, "ask", &mut transcript, user, cancel, tx).await;
+    {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            cancel.cancel();
+        });
+    }
+
+    let baseline = transcript.len();
+    let outcome = run_turn(
+        &context,
+        session_id.as_str(),
+        &mut transcript,
+        Message::user(&prompt),
+        cancel,
+        tx,
+    )
+    .await;
 
     printer.await.expect("printer task must not panic");
+
+    // Journal everything the turn appended, then the outcome events.
+    for message in &transcript[baseline..] {
+        journal_blocks(&mut store, &session_id, message, &model);
+    }
+    let events = match &outcome {
+        Ok(outcome) => outcome.events.clone(),
+        Err(error) => error.events.clone(),
+    };
+    journal_events(&mut store, &session_id, &events, &model);
+    if let (Some(store), Ok(outcome)) = (&mut store, &outcome) {
+        let _ = store.checkpoint(&spackle_core::message::Transcript {
+            messages: transcript.clone(),
+        });
+        let _ = outcome;
+    }
 
     match outcome {
         Ok(outcome) => {
@@ -320,7 +479,87 @@ async fn ask(args: AskArgs) -> Result<()> {
     }
 }
 
-fn load_config(flags: &EndpointFlags) -> Result<spackle_core::config::LoadedConfig> {
+fn journal_message(
+    store: &mut Option<SessionStore>,
+    session_id: &SessionId,
+    role: &str,
+    content: &str,
+    model: &str,
+) {
+    let Some(store) = store else { return };
+    let mut record = SessionRecord::new(session_id, SessionRecordKind::Message);
+    record.role = Some(role.to_owned());
+    record.content = Some(content.to_owned());
+    record.model = Some(model.to_owned());
+    let _ = store.append(record);
+}
+
+fn journal_blocks(
+    store: &mut Option<SessionStore>,
+    session_id: &SessionId,
+    message: &Message,
+    model: &str,
+) {
+    let Some(store) = store else { return };
+    for block in &message.blocks {
+        let mut record = match block {
+            ContentBlock::ToolCall(call) => {
+                let mut record = SessionRecord::new(session_id, SessionRecordKind::ToolCall);
+                record.call_id = Some(call.id.clone());
+                record.tool = Some(call.name.clone());
+                record.arguments = Some(call.arguments.clone());
+                record
+            }
+            ContentBlock::ToolResult(result) => {
+                let mut record = SessionRecord::new(session_id, SessionRecordKind::ToolResult);
+                record.call_id = Some(result.id.clone());
+                record.tool = Some(result.name.clone());
+                record.result = Some(serde_json::json!({
+                    "output": result.output,
+                    "is_error": result.is_error,
+                }));
+                record
+            }
+            ContentBlock::Text { text } => {
+                let mut record = SessionRecord::new(session_id, SessionRecordKind::Message);
+                record.role = Some(
+                    match message.role {
+                        spackle_core::message::Role::Assistant => "assistant",
+                        spackle_core::message::Role::User => "user",
+                        spackle_core::message::Role::System => "system",
+                        spackle_core::message::Role::Tool => "tool",
+                    }
+                    .to_owned(),
+                );
+                record.content = Some(text.clone());
+                record
+            }
+            ContentBlock::Reasoning { .. } => continue,
+        };
+        record.model = Some(model.to_owned());
+        let _ = store.append(record);
+    }
+}
+
+fn journal_events(
+    store: &mut Option<SessionStore>,
+    session_id: &SessionId,
+    events: &[AgentEvent],
+    model: &str,
+) {
+    let Some(store) = store else { return };
+    for event in events {
+        let mut record = SessionRecord::new(session_id, SessionRecordKind::Meta);
+        record.extra = Some(serde_json::json!({
+            "kind": event.kind.as_str(),
+            "payload": event.payload,
+        }));
+        record.model = Some(model.to_owned());
+        let _ = store.append(record);
+    }
+}
+
+pub(crate) fn load_config(flags: &EndpointFlags) -> Result<spackle_core::config::LoadedConfig> {
     let start_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut loader = Loader::standard(start_dir);
     loader.cli_overrides = flags.overrides();
@@ -329,7 +568,27 @@ fn load_config(flags: &EndpointFlags) -> Result<spackle_core::config::LoadedConf
         .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
-fn build_client(config: &spackle_core::config::Config) -> Result<LlamaCppClient> {
+pub(crate) fn build_client(config: &spackle_core::config::Config) -> Result<LlamaCppClient> {
     LlamaCppClient::from_endpoint_config(&config.endpoint)
         .map_err(|error| anyhow::anyhow!(error.to_string()))
+}
+
+/// Whether stderr is a terminal (approval prompts only make sense then).
+fn stderr_is_terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stderr().is_terminal()
+}
+
+/// Detected build/test toolchains, rendered for the environment prompt.
+pub(crate) fn detect_toolchain() -> Option<String> {
+    let candidates = [
+        "python3", "python", "node", "deno", "cargo", "rustc", "go", "javac", "gcc", "clang",
+        "make", "git", "sh", "bash",
+    ];
+    let found: Vec<&str> = candidates
+        .iter()
+        .copied()
+        .filter(|name| which::which(name).is_ok())
+        .collect();
+    (!found.is_empty()).then(|| found.join(", "))
 }

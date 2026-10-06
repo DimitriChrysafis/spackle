@@ -28,6 +28,9 @@ pub struct SystemPromptInput {
     /// Generation profile name (affects sampling, not prompt text; included
     /// only as an environment fact for model self-awareness).
     pub profile: Option<String>,
+    /// Detected build/test toolchains on this machine (e.g. `python3`,
+    /// `cargo`, `node`), so the model does not guess command names.
+    pub toolchain: Option<String>,
 }
 
 /// An assembled, deterministic system prompt.
@@ -60,6 +63,7 @@ impl SystemPrompt {
             ("model", input.model.as_deref()),
             ("profile", input.profile.as_deref()),
             ("platform", input.platform.as_deref()),
+            ("toolchain", input.toolchain.as_deref()),
         ]
         .into_iter()
         .filter_map(|(key, value)| value.map(|value| (key, value)))
@@ -102,6 +106,7 @@ mod tests {
             model: Some("qwen3.8-27b-local".to_owned()),
             platform: Some("aarch64-apple-darwin".to_owned()),
             profile: Some("balanced".to_owned()),
+            toolchain: Some("python3, cargo".to_owned()),
         }
     }
 
