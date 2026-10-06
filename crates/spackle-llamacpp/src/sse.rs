@@ -62,7 +62,9 @@ impl SseParser {
                 None => break,
             };
             let mut line: Vec<u8> = self.pending.drain(..=newline).collect();
-            // Tolerate CRLF: strip one trailing CR.
+            // Drop the terminating newline, then tolerate CRLF by stripping
+            // one trailing CR.
+            line.pop();
             if line.last() == Some(&b'\r') {
                 line.pop();
             }
@@ -231,8 +233,10 @@ mod tests {
         let mut parser = SseParser::new();
         let events = parser.feed(b"data: incomplete\n").expect("feed");
         assert!(events.is_empty());
+        // A bare field line is ignored per spec; the pending data still
+        // dispatches when the blank line ends the event.
         let events = parser.feed(b"more\n\n").expect("feed");
-        assert!(events.is_empty(), "non-data lines must not create an event");
+        assert_eq!(events, vec!["incomplete"]);
     }
 
     #[test]
