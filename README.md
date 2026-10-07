@@ -76,36 +76,50 @@ allow_public_endpoint = true
 
 ## Benchmark
 
-`bench/tasks/` holds 31 hand-written bug-fix tasks (12 Python, 8 Rust,
-6 Node, 2 shell) — wrong operators and off-by-ones up through shared-memo
-leaks, HTML-escape ordering, a binary search that never converges, and a
-bug hiding two files away from the failing test. Each task has a `repo/`
-fixture and a `check` command that exits zero when the bug is really fixed.
-`spackle eval` copies the fixture to a temp dir, runs one agent turn, then
-runs the check — no credit for "looks fixed".
+Two suites under `bench/`:
+
+- `bench/tasks/` — 31 single-bug smoke tasks, one or two files each
+  (wrong operators, off-by-ones, escape ordering). Fast sanity check.
+- `bench/tasks-hard/` — 21 multi-file repos, ~150-240 lines each
+  (Python, Rust, Node, shell), one planted bug per repo. Prompts only
+  report that checks fail plus the command to reproduce; the cause is
+  never named. This is the headline suite.
+
+Each task has a `repo/` fixture and a `check` command that exits zero when
+the bug is really fixed. `spackle eval` copies the fixture to a temp dir,
+runs one agent turn, then runs the check — no credit for "looks fixed".
 
 ```sh
-spackle eval --tasks bench/tasks --runs 3 --jobs 3 \
+spackle eval --tasks bench/tasks-hard --runs 3 --jobs 6 \
   --model <model> --base-url <url> --api openai
 ```
 
 Results land in `bench/results/<name>.json` with per-run steps, tool calls,
 invalid calls, tokens, wall time, timeouts, and loop-guard aborts.
 
-### Results
+### Results (hard suite, 3 runs per task, balanced profile)
 
-3 runs per task, balanced profile. Every task folder's check ran; a run only
-counts when the exit status is zero.
+| run                                    | solved | solve % | mean steps | invalid calls |
+| -------------------------------------- | ------ | ------- | ---------- | ------------- |
+| gpt-5-mini                             | 60/63  | 95%     | 9.3        | 0             |
+| gpt-4o-mini                            | 25/63  | 40%     | 20.6       | 0             |
+| gpt-4o-mini, `--no-read-guard`         | 19/63  | 30%     | 20.4       | 0             |
 
-| model                            | tasks | runs | solved | mean steps | invalid calls | loop aborts | timeouts |
-| -------------------------------- | ----- | ---- | ------ | ---------- | ------------- | ----------- | -------- |
-| gpt-5-mini (openai api)          | 31    | 93   | 93     | 7.2        | 0             | 0           | 0        |
-| Qwen3.8-27B-Splash (local)       | 31    | 93   | 93     | 5.8        | 0             | 0           | 0        |
+The suite discriminates. gpt-4o-mini tops out the step budget (24) on the
+hardest tasks; gpt-5-mini clears everything except `hc-toml-lite`, where
+string-aware comment stripping defeats it in all three runs.
 
-The suite is saturated at this size — both models clear every task. What the
-numbers do show: the harness held up over 186 agent turns / 1117 tool calls
-with zero malformed calls, and mean wall time is ~13s per run on gpt-5-mini
-vs ~71s on the local 27B.
+The read-guard ablation shows a real before/after on this suite: removing
+the read-before-edit rule drops gpt-4o-mini from 40% to 30%. Without the
+guard the model writes files it never opened, misses context, and either
+hits the step cap or declares victory while the check still fails. On the
+smoke suite the same ablation shows no delta (93/93 both ways) — guard
+value only shows up when tasks get hard enough to punish blind edits.
+
+Per-task solve rates on the hard suite span 0-100% for gpt-4o-mini
+(`hc-semver`, `hc-logrotate-py`, `hc-ratelimit` solved every time;
+`hc-calc-py`, `hc-globmatch-rs`, `hc-ini-rs`, `hc-querystring-js` never
+solved) — headroom for ablations and model comparisons to mean something.
 
 Ablation flags: `--no-loop-guard`, `--no-read-guard`, `--no-output-cap`.
 
