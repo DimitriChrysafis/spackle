@@ -2520,6 +2520,8 @@ dependencies = [
  "anyhow",
  "clap",
  "futures-util",
+ "globset",
+ "ignore",
  "serde",
  "serde_json",
  "spackle-core",
