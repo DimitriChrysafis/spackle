@@ -1,5 +1,5 @@
 prompt = """fib.rs: fib(10) should be 89 but returns 55. Build and run the
 tests to reproduce: rustc --edition 2021 --test fib.rs -o fib_test && ./fib_test
 Fix the bug so the test binary passes."""
-check = """rustc --edition 2021 --test fib.rs -o fib_test && ./fib_test"""
+check = '''rustc --edition 2021 --test fib.rs -o fib_test && timeout 60 ./fib_test | grep -q "ok\. [1-9]"'''
 timeout_seconds = 300

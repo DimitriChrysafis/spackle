@@ -3,5 +3,5 @@ condition should be `b != 0` but the early return is missing so gcd(12, 8) works
 while gcd(0, n) hangs. Build and run with a timeout:
 rustc --edition 2021 --test gcd.rs -o gcd_test && ./gcd_test
 Fix the bug."""
-check = """rustc --edition 2021 --test gcd.rs -o gcd_test && timeout 30 ./gcd_test"""
+check = '''rustc --edition 2021 --test gcd.rs -o gcd_test && timeout 60 ./gcd_test | grep -q "ok\. [1-9]"'''
 timeout_seconds = 300

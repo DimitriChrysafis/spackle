@@ -2,5 +2,5 @@ prompt = """stats.rs: median(&[1,2,3,4]) should be 2.5 but returns 3.0 — it
 picks the upper middle element instead of averaging the two middles.
 Build and run: rustc --edition 2021 --test stats.rs -o stats_test && ./stats_test
 Fix the bug."""
-check = """rustc --edition 2021 --test stats.rs -o stats_test && ./stats_test"""
+check = '''rustc --edition 2021 --test stats.rs -o stats_test && timeout 60 ./stats_test | grep -q "ok\. [1-9]"'''
 timeout_seconds = 300

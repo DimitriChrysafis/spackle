@@ -9,11 +9,4 @@ pub fn count_char(s: &str, target: char) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn counts() {
-        assert_eq!(count_char("banana", 'a'), 3);
-        assert_eq!(count_char("banana", 'z'), 0);
-    }
-}
+mod tests;

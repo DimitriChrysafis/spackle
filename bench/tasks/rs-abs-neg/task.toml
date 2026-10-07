@@ -1,5 +1,5 @@
 prompt = """num.rs: abs(-5) should return 5 but returns -5. The sign check is
 inverted. Build and run: rustc --edition 2021 --test num.rs -o num_test && ./num_test
 Fix the bug."""
-check = """rustc --edition 2021 --test num.rs -o num_test && ./num_test"""
+check = '''rustc --edition 2021 --test num.rs -o num_test && timeout 60 ./num_test | grep -q "ok\. [1-9]"'''
 timeout_seconds = 300

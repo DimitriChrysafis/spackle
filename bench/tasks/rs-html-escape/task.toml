@@ -2,5 +2,5 @@ prompt = """esc.rs: escape("&") returns "&amp;amp;" instead of "&amp;" —
 the escape order corrupts already-escaped text.
 Build and run: rustc --edition 2021 --test esc.rs -o esc_test && ./esc_test
 Fix the bug."""
-check = """rustc --edition 2021 --test esc.rs -o esc_test && ./esc_test"""
+check = '''rustc --edition 2021 --test esc.rs -o esc_test && timeout 60 ./esc_test | grep -q "ok\. [1-9]"'''
 timeout_seconds = 300
