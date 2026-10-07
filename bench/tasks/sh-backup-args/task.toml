@@ -4,3 +4,4 @@ path — currently it copies to the wrong place because of an argument bug.
 Fix it so `sh check.sh` passes."""
 check = """sh check.sh"""
 timeout_seconds = 300
+protect = ["input.txt"]

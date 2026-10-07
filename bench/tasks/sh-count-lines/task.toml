@@ -4,3 +4,4 @@ There is a fixture file `a b.txt` in the repo. Run `sh check.sh` to see the bug.
 Fix it."""
 check = """sh check.sh"""
 timeout_seconds = 300
+protect = ["a b.txt"]
