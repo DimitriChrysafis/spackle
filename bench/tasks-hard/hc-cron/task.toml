@@ -1,0 +1,5 @@
+prompt = """A repo in this workspace has failing checks. Reproduce with:
+  python3 -m unittest discover -s tests -t . -q
+Diagnose the underlying bug and fix it so the check exits 0. Do not modify or delete tests."""
+check = """python3 -m unittest discover -s tests -t . -q"""
+timeout_seconds = 420

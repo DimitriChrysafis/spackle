@@ -1,0 +1,5 @@
+prompt = """A repo in this workspace has failing checks. Reproduce with:
+  cargo test -q
+Diagnose the underlying bug and fix it so the check exits 0. Do not modify or delete tests."""
+check = """cargo test -q"""
+timeout_seconds = 480
