@@ -202,7 +202,7 @@ impl InferenceTransport for LlamaTransport {
         cancel: CancellationToken,
         events: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
     ) -> Result<InferenceResult, TransportError> {
-        let body = chat_request_body(
+        let mut body = chat_request_body(
             &request.model,
             &request.system,
             &request.messages,
@@ -213,7 +213,25 @@ impl InferenceTransport for LlamaTransport {
         );
         let seed = format!("{}-{}", std::process::id(), crate::next_request_counter());
         let mut assembler = StepAssembler::new(seed);
-        let mut stream = self.client.stream_chat(body).await?;
+        // Non-reasoning models on generic OpenAI endpoints reject
+        // `reasoning_effort` outright; degrade once instead of failing.
+        let mut stream = match self.client.stream_chat(body.clone()).await {
+            Ok(stream) => stream,
+            Err(err) => {
+                let transport: TransportError = err.into();
+                match transport {
+                    TransportError::Capability { ref feature, .. }
+                        if feature.contains("reasoning_effort")
+                            && body.get("reasoning_effort").is_some() =>
+                    {
+                        body.as_object_mut()
+                            .map(|m| m.remove("reasoning_effort"));
+                        self.client.stream_chat(body).await?
+                    }
+                    other => return Err(other),
+                }
+            }
+        };
         let mut parser = SseParser::new();
 
         // Bridge the std condvar cancellation token into the async select.
