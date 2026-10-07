@@ -602,11 +602,20 @@ fn copy_dir(from: &Path, to: &Path) -> Result<()> {
 }
 
 /// Walk `dir` and return {relative path: bytes} for every file matching the
-/// protect globs.
+/// protect globs, skipping generated artifacts (bytecode caches, build
+/// output) that appear inside test dirs when the suite runs.
 fn collect_protected(
     dir: &Path,
     globs: &globset::GlobSet,
 ) -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>> {
+    const ARTIFACT_DIRS: &[&str] = &[
+        "__pycache__",
+        "node_modules",
+        "target",
+        ".pytest_cache",
+        ".git",
+    ];
+    const ARTIFACT_EXTS: &[&str] = &["pyc", "pyo", "class"];
     let mut files = std::collections::BTreeMap::new();
     for entry in ignore::WalkBuilder::new(dir).require_git(false).build() {
         let entry = entry?;
@@ -614,7 +623,16 @@ fn collect_protected(
             continue;
         }
         let rel = entry.path().strip_prefix(dir)?.to_path_buf();
-        if globs.is_match(&rel) {
+        let is_artifact = rel.components().any(|c| {
+            c.as_os_str()
+                .to_str()
+                .is_some_and(|s| ARTIFACT_DIRS.contains(&s))
+        }) || rel
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| ARTIFACT_EXTS.contains(&e))
+            || rel.file_name().is_some_and(|n| n == ".DS_Store");
+        if globs.is_match(&rel) && !is_artifact {
             files.insert(rel, std::fs::read(entry.path())?);
         }
     }
@@ -911,6 +929,30 @@ mod tests {
         let (solved, tampered) = grade(&fixture, work.path(), &set()).await;
         assert!(!solved);
         assert_eq!(tampered.len(), 2); // __init__.py and test_calc.py deleted
+    }
+
+    #[tokio::test]
+    async fn test_run_artifacts_do_not_count_as_tampering() {
+        let dir = make_fixture();
+        let fixture = dir.path().join("repo");
+        let work = tempfile::tempdir().unwrap();
+        copy_dir(&fixture, work.path()).unwrap();
+        // Running the suite drops bytecode caches into tests/__pycache__.
+        std::fs::create_dir_all(work.path().join("tests/__pycache__")).unwrap();
+        std::fs::write(
+            work.path()
+                .join("tests/__pycache__/test_calc.cpython-314.pyc"),
+            b"\x00\x01",
+        )
+        .unwrap();
+        std::fs::write(
+            work.path().join("calc.py"),
+            "def add(a, b):\n    return a + b\n",
+        )
+        .unwrap();
+        let (solved, tampered) = grade(&fixture, work.path(), &set()).await;
+        assert!(solved);
+        assert!(tampered.is_empty());
     }
 
     /// Every benchmark task must resolve at least one protected file, else
