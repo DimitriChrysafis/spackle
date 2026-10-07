@@ -88,6 +88,10 @@ pub(crate) struct EvalArgs {
     #[arg(long)]
     pub no_output_cap: bool,
 
+    /// Print each task's protected (non-editable) files and exit.
+    #[arg(long)]
+    pub list_protected: bool,
+
     #[command(flatten)]
     pub endpoint: EndpointFlags,
 }
@@ -100,13 +104,54 @@ struct TaskSpec {
     check: String,
     #[serde(default)]
     timeout_seconds: Option<u64>,
+    /// Extra globs of files the agent may not touch. Merged with the
+    /// built-in test defaults.
+    #[serde(default)]
+    protect: Vec<String>,
 }
+
+/// Files that count as "the grader" and must match the fixture byte-for-byte
+/// when the check runs.
+const DEFAULT_PROTECT: &[&str] = &[
+    "tests/**",
+    "test/**",
+    "**/test_*.py",
+    "**/*_test.py",
+    "**/*.test.js",
+    "**/*.test.ts",
+    "**/*.spec.js",
+    "**/*.spec.ts",
+    "**/conftest.py",
+    "**/check.py",
+    "**/run_tests*.sh",
+    "**/check.sh",
+    "**/test.sh",
+];
 
 #[derive(Debug)]
 struct Task {
     name: String,
     repo_dir: PathBuf,
     spec: TaskSpec,
+    protect: globset::GlobSet,
+}
+
+/// Compile a task's protect globs (defaults + task.toml extras).
+fn protect_set(extra: &[String]) -> Result<globset::GlobSet> {
+    let mut builder = globset::GlobSetBuilder::new();
+    let mut add = |pattern: &str| -> Result<()> {
+        builder.add(
+            globset::Glob::new(pattern).with_context(|| format!("bad protect glob `{pattern}`"))?,
+        );
+        Ok(())
+    };
+    for pattern in DEFAULT_PROTECT {
+        add(pattern)?;
+    }
+    for pattern in extra {
+        add(pattern)?;
+    }
+    Ok(builder.build()?)
 }
 
 #[derive(Debug, Serialize)]
@@ -123,6 +168,9 @@ struct RunRecord {
     prompt_tokens: u64,
     completion_tokens: u64,
     wall_ms: u64,
+    /// True when protected (test) files differed from the fixture.
+    #[serde(default)]
+    tampered: bool,
     /// Agent-side failure reason, if the turn did not complete.
     error: Option<String>,
 }
@@ -139,6 +187,8 @@ struct TaskSummary {
     mean_wall_s: f64,
     timeouts: u32,
     loop_aborts: u32,
+    /// Runs where protected files were modified, deleted, or added.
+    tampered: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -152,6 +202,17 @@ pub async fn run(args: EvalArgs) -> Result<()> {
     let tasks = load_tasks(&args.tasks, args.only.as_deref())?;
     if tasks.is_empty() {
         bail!("no tasks under {}", args.tasks.display());
+    }
+
+    if args.list_protected {
+        for task in &tasks {
+            let files = collect_protected(&task.repo_dir, &task.protect)?;
+            println!("{} ({} protected)", task.name, files.len());
+            for path in files.keys() {
+                println!("  {}", path.display());
+            }
+        }
+        return Ok(());
     }
 
     let loaded = load_config(&args.endpoint)?;
@@ -274,6 +335,7 @@ pub async fn run(args: EvalArgs) -> Result<()> {
             prompt_tokens: 0,
             completion_tokens: 0,
             wall_ms: 0,
+            tampered: false,
             error: Some(format!("harness: {error}")),
         }));
     }
@@ -435,8 +497,32 @@ async fn run_one(
         }
     }
 
+    let tampered = match tampered_paths(&task.repo_dir, workdir.path(), &task.protect) {
+        Ok(paths) if paths.is_empty() => None,
+        Ok(paths) => Some(paths),
+        Err(error) => {
+            return Ok(RunRecord {
+                task: task.name.clone(),
+                run: run_idx,
+                solved: false,
+                steps,
+                tool_calls,
+                invalid_tool_calls,
+                tool_errors,
+                prompt_tokens,
+                completion_tokens,
+                wall_ms,
+                tampered: false,
+                error: Some(format!("protect scan: {error}")),
+            });
+        }
+    };
+    if tampered.is_some() {
+        restore_protected(&task.repo_dir, workdir.path(), &task.protect)?;
+    }
+
     let check = run_check(&task.spec.check, workdir.path(), CHECK_TIMEOUT_SECONDS).await;
-    let solved = matches!(check, Ok(true));
+    let solved = tampered.is_none() && matches!(check, Ok(true));
 
     Ok(RunRecord {
         task: task.name.clone(),
@@ -449,11 +535,14 @@ async fn run_one(
         prompt_tokens,
         completion_tokens,
         wall_ms,
-        error: error.or(match check {
-            Err(error) => Some(format!("check harness: {error}")),
-            Ok(false) => None,
-            Ok(true) => None,
-        }),
+        tampered: tampered.is_some(),
+        error: match tampered {
+            Some(paths) => Some(format!("tampered: {}", paths.join(", "))),
+            None => error.or(match check {
+                Err(error) => Some(format!("check harness: {error}")),
+                Ok(_) => None,
+            }),
+        },
     })
 }
 
@@ -486,10 +575,13 @@ fn load_tasks(dir: &Path, only: Option<&str>) -> Result<Vec<Task>> {
                 .with_context(|| format!("cannot read {}", spec_path.display()))?,
         )
         .with_context(|| format!("bad task.toml in {name}"))?;
+        let protect =
+            protect_set(&spec.protect).with_context(|| format!("bad protect globs in {name}"))?;
         tasks.push(Task {
             name,
             repo_dir,
             spec,
+            protect,
         });
     }
     Ok(tasks)
@@ -505,6 +597,72 @@ fn copy_dir(from: &Path, to: &Path) -> Result<()> {
         } else {
             std::fs::copy(entry.path(), &dest)?;
         }
+    }
+    Ok(())
+}
+
+/// Walk `dir` and return {relative path: bytes} for every file matching the
+/// protect globs.
+fn collect_protected(
+    dir: &Path,
+    globs: &globset::GlobSet,
+) -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>> {
+    let mut files = std::collections::BTreeMap::new();
+    for entry in ignore::WalkBuilder::new(dir).require_git(false).build() {
+        let entry = entry?;
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let rel = entry.path().strip_prefix(dir)?.to_path_buf();
+        if globs.is_match(&rel) {
+            files.insert(rel, std::fs::read(entry.path())?);
+        }
+    }
+    Ok(files)
+}
+
+/// Paths where the workdir's protected files differ from the fixture:
+/// changed content, missing files, or new files under protected globs.
+fn tampered_paths(
+    fixture_dir: &Path,
+    workdir: &Path,
+    globs: &globset::GlobSet,
+) -> Result<Vec<String>> {
+    let fixture = collect_protected(fixture_dir, globs)?;
+    let current = collect_protected(workdir, globs)?;
+    let mut bad: Vec<String> = Vec::new();
+    for (rel, bytes) in &fixture {
+        match current.get(rel) {
+            Some(have) if have == bytes => {}
+            Some(_) => bad.push(format!("{} (edited)", rel.display())),
+            None => bad.push(format!("{} (deleted)", rel.display())),
+        }
+    }
+    for rel in current.keys() {
+        if !fixture.contains_key(rel) {
+            bad.push(format!("{} (added)", rel.display()));
+        }
+    }
+    bad.sort();
+    Ok(bad)
+}
+
+/// Overwrite the workdir's protected files with the fixture copies and remove
+/// files the agent added under protected globs, so `check` sees the real tests.
+fn restore_protected(fixture_dir: &Path, workdir: &Path, globs: &globset::GlobSet) -> Result<()> {
+    let fixture = collect_protected(fixture_dir, globs)?;
+    let current = collect_protected(workdir, globs)?;
+    for rel in current.keys() {
+        if !fixture.contains_key(rel) {
+            std::fs::remove_file(workdir.join(rel))?;
+        }
+    }
+    for (rel, bytes) in &fixture {
+        let dest = workdir.join(rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dest, bytes)?;
     }
     Ok(())
 }
@@ -574,6 +732,7 @@ fn summarize(records: &[RunRecord]) -> Vec<TaskSummary> {
                             .is_some_and(|e| e.contains("repeated identical"))
                     })
                     .count() as u32,
+                tampered: runs.iter().filter(|r| r.tampered).count() as u32,
             }
         })
         .collect()
@@ -582,16 +741,16 @@ fn summarize(records: &[RunRecord]) -> Vec<TaskSummary> {
 fn print_table(report: &Report) {
     println!();
     println!(
-        "| {:<28} | {:>5} | {:>5} | {:>6} | {:>7} | {:>6} | {:>4} | {:>5} |",
-        "task", "runs", "solve", "steps", "tools", "tokens", "to", "loop"
+        "| {:<28} | {:>5} | {:>5} | {:>6} | {:>7} | {:>6} | {:>4} | {:>5} | {:>4} |",
+        "task", "runs", "solve", "steps", "tools", "tokens", "to", "loop", "tamp"
     );
     println!(
-        "|{:-<30}|{:-<7}|{:-<7}|{:-<8}|{:-<9}|{:-<8}|{:-<6}|{:-<7}|",
-        "", "", "", "", "", "", "", ""
+        "|{:-<30}|{:-<7}|{:-<7}|{:-<8}|{:-<9}|{:-<8}|{:-<6}|{:-<7}|{:-<6}|",
+        "", "", "", "", "", "", "", "", ""
     );
     for row in &report.summary {
         println!(
-            "| {:<28} | {:>5} | {:>4.0}% | {:>6.1} | {:>7.1} | {:>6.0} | {:>4} | {:>5} |",
+            "| {:<28} | {:>5} | {:>4.0}% | {:>6.1} | {:>7.1} | {:>6.0} | {:>4} | {:>5} | {:>4} |",
             row.task,
             row.runs,
             row.solve_rate * 100.0,
@@ -600,6 +759,7 @@ fn print_table(report: &Report) {
             row.mean_completion_tokens,
             row.timeouts,
             row.loop_aborts,
+            row.tampered,
         );
     }
     let total = report.runs.len() as f64;
@@ -612,4 +772,170 @@ fn print_table(report: &Report) {
             0.0
         }
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a tiny python fixture: `calc.py` with a planted bug plus
+    /// `tests/test_calc.py` catching it. Returns the temp dir.
+    fn make_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join("tests")).unwrap();
+        std::fs::write(repo.join("tests/__init__.py"), "").unwrap();
+        std::fs::write(
+            repo.join("tests/test_calc.py"),
+            "import unittest\nfrom calc import add\nclass T(unittest.TestCase):\n  def test_add(self):\n    self.assertEqual(add(2, 3), 5)\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("calc.py"), "def add(a, b):\n    return a - b\n").unwrap();
+        dir
+    }
+
+    const CHECK: &str = "python3 -m unittest discover -s tests -t . -q";
+
+    fn set() -> globset::GlobSet {
+        protect_set(&[]).unwrap()
+    }
+
+    /// Mirror of the grading flow in `run_one`: tamper scan, restore, check.
+    /// Returns (solved, tampered_paths).
+    async fn grade(
+        fixture_dir: &Path,
+        workdir: &Path,
+        globs: &globset::GlobSet,
+    ) -> (bool, Vec<String>) {
+        let tampered = tampered_paths(fixture_dir, workdir, globs).unwrap();
+        if !tampered.is_empty() {
+            restore_protected(fixture_dir, workdir, globs).unwrap();
+        }
+        let solved = tampered.is_empty()
+            && matches!(
+                run_check(CHECK, workdir, CHECK_TIMEOUT_SECONDS).await,
+                Ok(true)
+            );
+        (solved, tampered)
+    }
+
+    #[tokio::test]
+    async fn unmodified_fixture_fails_check_without_tamper() {
+        let dir = make_fixture();
+        let fixture = dir.path().join("repo");
+        let work = tempfile::tempdir().unwrap();
+        copy_dir(&fixture, work.path()).unwrap();
+        let (solved, tampered) = grade(&fixture, work.path(), &set()).await;
+        assert!(!solved);
+        assert!(tampered.is_empty());
+    }
+
+    #[tokio::test]
+    async fn real_fix_passes_and_is_not_tampered() {
+        let dir = make_fixture();
+        let fixture = dir.path().join("repo");
+        let work = tempfile::tempdir().unwrap();
+        copy_dir(&fixture, work.path()).unwrap();
+        std::fs::write(
+            work.path().join("calc.py"),
+            "def add(a, b):\n    return a + b\n",
+        )
+        .unwrap();
+        let (solved, tampered) = grade(&fixture, work.path(), &set()).await;
+        assert!(solved);
+        assert!(tampered.is_empty());
+    }
+
+    #[tokio::test]
+    async fn edited_test_is_tampered_and_check_reruns_real_tests() {
+        let dir = make_fixture();
+        let fixture = dir.path().join("repo");
+        let work = tempfile::tempdir().unwrap();
+        copy_dir(&fixture, work.path()).unwrap();
+        // Weaken the assertion so the buggy code would pass.
+        std::fs::write(
+            work.path().join("tests/test_calc.py"),
+            "import unittest\nclass T(unittest.TestCase):\n  def test_add(self):\n    pass\n",
+        )
+        .unwrap();
+        let (solved, tampered) = grade(&fixture, work.path(), &set()).await;
+        assert!(!solved);
+        assert_eq!(tampered, vec!["tests/test_calc.py (edited)"]);
+        // The original test file was restored before the check ran, so the
+        // real test is back in place and still fails on buggy code.
+        assert!(
+            std::fs::read_to_string(work.path().join("tests/test_calc.py"))
+                .unwrap()
+                .contains("add(2, 3)")
+        );
+    }
+
+    #[tokio::test]
+    async fn deleted_test_is_tampered() {
+        let dir = make_fixture();
+        let fixture = dir.path().join("repo");
+        let work = tempfile::tempdir().unwrap();
+        copy_dir(&fixture, work.path()).unwrap();
+        std::fs::remove_file(work.path().join("tests/test_calc.py")).unwrap();
+        let (solved, tampered) = grade(&fixture, work.path(), &set()).await;
+        assert!(!solved);
+        assert_eq!(tampered, vec!["tests/test_calc.py (deleted)"]);
+    }
+
+    #[tokio::test]
+    async fn added_test_file_is_tampered_and_removed() {
+        let dir = make_fixture();
+        let fixture = dir.path().join("repo");
+        let work = tempfile::tempdir().unwrap();
+        copy_dir(&fixture, work.path()).unwrap();
+        std::fs::write(work.path().join("tests/test_extra.py"), "x = 1\n").unwrap();
+        let (solved, tampered) = grade(&fixture, work.path(), &set()).await;
+        assert!(!solved);
+        assert_eq!(tampered, vec!["tests/test_extra.py (added)"]);
+        assert!(!work.path().join("tests/test_extra.py").exists());
+    }
+
+    #[tokio::test]
+    async fn real_fix_with_restored_tests_passes_when_source_only_changed() {
+        let dir = make_fixture();
+        let fixture = dir.path().join("repo");
+        let work = tempfile::tempdir().unwrap();
+        copy_dir(&fixture, work.path()).unwrap();
+        // Agent fixes the bug AND deletes the test dir: tampered, so unsolved.
+        std::fs::write(
+            work.path().join("calc.py"),
+            "def add(a, b):\n    return a + b\n",
+        )
+        .unwrap();
+        std::fs::remove_dir_all(work.path().join("tests")).unwrap();
+        let (solved, tampered) = grade(&fixture, work.path(), &set()).await;
+        assert!(!solved);
+        assert_eq!(tampered.len(), 2); // __init__.py and test_calc.py deleted
+    }
+
+    /// Every benchmark task must resolve at least one protected file, else
+    /// the tamper check silently has nothing to compare.
+    #[test]
+    fn every_bench_task_has_protected_files() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("bench");
+        let mut missing = Vec::new();
+        for suite in ["tasks", "tasks-hard"] {
+            let dir = root.join(suite);
+            if !dir.is_dir() {
+                continue;
+            }
+            for task in load_tasks(&dir, None).unwrap() {
+                let files = collect_protected(&task.repo_dir, &task.protect).unwrap();
+                if files.is_empty() {
+                    missing.push(format!("{suite}/{}", task.name));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "tasks with no protected files: {missing:?}"
+        );
+    }
 }
