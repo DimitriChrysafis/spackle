@@ -224,8 +224,7 @@ impl InferenceTransport for LlamaTransport {
                         if feature.contains("reasoning_effort")
                             && body.get("reasoning_effort").is_some() =>
                     {
-                        body.as_object_mut()
-                            .map(|m| m.remove("reasoning_effort"));
+                        body.as_object_mut().map(|m| m.remove("reasoning_effort"));
                         self.client.stream_chat(body).await?
                     }
                     other => return Err(other),
