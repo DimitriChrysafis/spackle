@@ -152,7 +152,7 @@ cargo clippy --workspace --all-targets --offline
 cargo test --workspace --offline
 ```
 
-169 tests: SSE parser fuzz + fragmentation, stream integration against a real
+170 tests: SSE parser fuzz + fragmentation, stream integration against a real
 axum server, tool sandboxing, agent-loop state machine, eval tamper grading.
 
 Vendored crate sources (`vendor/`) stay out of git but on disk so the whole
